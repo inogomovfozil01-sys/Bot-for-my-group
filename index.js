@@ -4,7 +4,12 @@ const msgs = require('./messages');
 
 const bot = new Telegraf(config.TOKEN);
 
-// Имитация БД (в памяти)
+// Вспомогательная функция для защиты HTML
+const esc = (str) => {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+};
+
 let currentHomework = "Пока не задано";
 let currentMaterials = "Пока не добавлено";
 let currentVocabulary = "Пока не добавлено";
@@ -14,25 +19,24 @@ let userStates = {};
 const isOwner = (ctx) => ctx.from && ctx.from.id === config.OWNER_ID;
 const isTeacher = (ctx) => ctx.from && (ctx.from.id === config.TEACHER_ID || ctx.from.id === config.OWNER_ID);
 
-// Проверка на ЛС и сохранение пользователя
 const checkPrivate = (ctx, next) => {
     if (ctx.chat.type !== 'private') return;
-    if (ctx.from) allUsers.set(ctx.from.id, `${ctx.from.first_name}${ctx.from.username ? ` (@${ctx.from.username})` : ''}`);
+    if (ctx.from) allUsers.set(ctx.from.id, `${esc(ctx.from.first_name)}${ctx.from.username ? ` (@${ctx.from.username})` : ''}`);
     return next();
 };
 
-// Проверка членства в группе
 const checkMembership = async (ctx, next) => {
     if (isOwner(ctx) || isTeacher(ctx)) return next();
     try {
         const member = await ctx.telegram.getChatMember(config.GROUP_ID, ctx.from.id);
         if (['member', 'administrator', 'creator'].includes(member.status)) return next();
-        return ctx.reply(msgs.accessDenied);
-    } catch (e) { return ctx.reply(msgs.accessDenied); }
+        return ctx.reply(msgs.accessDenied, { parse_mode: 'HTML' });
+    } catch (e) { 
+        return ctx.reply(msgs.accessDenied, { parse_mode: 'HTML' }); 
+    }
 };
 
-// Главное меню
-const mainMenu = (ctx) => {
+const getMenu = (ctx) => {
     if (isOwner(ctx)) {
         return Markup.keyboard([
             [msgs.buttons.student.homework, msgs.buttons.student.vocabulary, msgs.buttons.student.materials],
@@ -55,125 +59,116 @@ const mainMenu = (ctx) => {
 };
 
 bot.start(checkPrivate, checkMembership, (ctx) => {
-    ctx.reply(isOwner(ctx) ? msgs.ownerMenu : (isTeacher(ctx) ? msgs.teacherMenu : msgs.studentMenu), mainMenu(ctx));
+    const txt = isOwner(ctx) ? msgs.ownerMenu : (isTeacher(ctx) ? msgs.teacherMenu : msgs.studentMenu);
+    ctx.reply(txt, { parse_mode: 'HTML', ...getMenu(ctx) });
 });
 
-// --- ОБРАБОТКА КНОПОК ПРОСМОТРА ---
-bot.hears(msgs.buttons.student.homework, checkPrivate, checkMembership, (ctx) => ctx.reply(msgs.homeworkDisplay(currentHomework), { parse_mode: 'Markdown' }));
-bot.hears(msgs.buttons.student.vocabulary, checkPrivate, checkMembership, (ctx) => ctx.reply(msgs.vocabDisplay(currentVocabulary), { parse_mode: 'Markdown' }));
-bot.hears(msgs.buttons.student.materials, checkPrivate, checkMembership, (ctx) => ctx.reply(msgs.materialsDisplay(currentMaterials), { parse_mode: 'Markdown', disable_web_page_preview: true }));
+bot.hears(msgs.buttons.student.homework, checkPrivate, checkMembership, (ctx) => ctx.reply(msgs.homeworkDisplay(esc(currentHomework)), { parse_mode: 'HTML' }));
+bot.hears(msgs.buttons.student.vocabulary, checkPrivate, checkMembership, (ctx) => ctx.reply(msgs.vocabDisplay(esc(currentVocabulary)), { parse_mode: 'HTML' }));
+bot.hears(msgs.buttons.student.materials, checkPrivate, checkMembership, (ctx) => ctx.reply(msgs.materialsDisplay(esc(currentMaterials)), { parse_mode: 'HTML', disable_web_page_preview: true }));
 
-// --- ФУНКЦИИ ВЛАДЕЛЬЦА ---
-bot.hears(msgs.buttons.owner.stats, checkPrivate, (ctx) => {
-    if (isOwner(ctx)) ctx.reply(`📊 Пользователей в базе: ${allUsers.size}`);
+bot.hears(msgs.buttons.student.help, checkPrivate, checkMembership, (ctx) => {
+    userStates[ctx.from.id] = { step: 'ASKING_TEACHER' };
+    ctx.reply(msgs.helpPrompt, { parse_mode: 'HTML', ...Markup.keyboard([[msgs.buttons.common.finish]]).resize() });
 });
 
+bot.hears(msgs.buttons.student.feedback, checkPrivate, checkMembership, (ctx) => {
+    userStates[ctx.from.id] = { step: 'ASKING_OWNER' };
+    ctx.reply(msgs.feedbackPrompt, { parse_mode: 'HTML', ...Markup.keyboard([[msgs.buttons.common.finish]]).resize() });
+});
+
+bot.hears(msgs.buttons.owner.stats, checkPrivate, (ctx) => isOwner(ctx) && ctx.reply(`📊 База: ${allUsers.size} чел.`, { parse_mode: 'HTML' }));
 bot.hears(msgs.buttons.owner.exportUsers, checkPrivate, (ctx) => {
     if (!isOwner(ctx)) return;
-    let list = "📥 **Список учеников:**\n\n";
-    allUsers.forEach((name, id) => { list += `• ${name} [ID: \`${id}\`]\n`; });
-    ctx.reply(list, { parse_mode: 'Markdown' });
+    let s = "📥 <b>Список:</b>\n\n";
+    allUsers.forEach((v, k) => s += `• ${v} (<code>${k}</code>)\n`);
+    ctx.reply(s, { parse_mode: 'HTML' });
 });
 
 bot.hears(msgs.buttons.owner.broadcastAll, checkPrivate, (ctx) => {
     if (!isOwner(ctx)) return;
-    userStates[ctx.from.id] = { step: 'WAITING_BROADCAST' };
-    ctx.reply(msgs.broadcastPrompt, Markup.removeKeyboard());
+    userStates[ctx.from.id] = { step: 'WAIT_BROAD' };
+    ctx.reply(msgs.broadcastPrompt, { parse_mode: 'HTML', ...Markup.removeKeyboard() });
 });
 
-// --- РЕЖИМЫ ОТПРАВКИ (УЧЕНИК) ---
-bot.hears(msgs.buttons.student.help, checkPrivate, checkMembership, (ctx) => {
-    userStates[ctx.from.id] = { step: 'SENDING_HELP' };
-    ctx.reply(msgs.helpPrompt, Markup.keyboard([[msgs.buttons.common.finish]]).resize(), { parse_mode: 'Markdown' });
-});
+bot.hears(msgs.buttons.teacher.setHomework, (ctx) => isTeacher(ctx) && (userStates[ctx.from.id] = { step: 'W_HW' }, ctx.reply("Введите текст ДЗ:", Markup.removeKeyboard())));
+bot.hears(msgs.buttons.teacher.setVocabulary, (ctx) => isTeacher(ctx) && (userStates[ctx.from.id] = { step: 'W_VOC' }, ctx.reply("Введите слова:", Markup.removeKeyboard())));
+bot.hears(msgs.buttons.teacher.setMaterials, (ctx) => isTeacher(ctx) && (userStates[ctx.from.id] = { step: 'W_MAT' }, ctx.reply("Введите материалы:", Markup.removeKeyboard())));
+bot.hears(msgs.buttons.teacher.sendNews, (ctx) => isTeacher(ctx) && (userStates[ctx.from.id] = { step: 'W_NEWS' }, ctx.reply("Введите новость:", Markup.removeKeyboard())));
 
-bot.hears(msgs.buttons.student.feedback, checkPrivate, checkMembership, (ctx) => {
-    userStates[ctx.from.id] = { step: 'SENDING_FEEDBACK' };
-    ctx.reply(msgs.studentFeedbackPrompt, Markup.keyboard([[msgs.buttons.common.finish]]).resize(), { parse_mode: 'Markdown' });
-});
-
-// --- КНОПКИ УЧИТЕЛЯ ---
-bot.hears(msgs.buttons.teacher.setHomework, checkPrivate, (ctx) => { if (isTeacher(ctx)) { userStates[ctx.from.id] = { step: 'W_HW' }; ctx.reply(msgs.setHwPrompt, Markup.removeKeyboard()); } });
-bot.hears(msgs.buttons.teacher.setVocabulary, checkPrivate, (ctx) => { if (isTeacher(ctx)) { userStates[ctx.from.id] = { step: 'W_VOC' }; ctx.reply(msgs.setVocabPrompt, Markup.removeKeyboard()); } });
-bot.hears(msgs.buttons.teacher.setMaterials, checkPrivate, (ctx) => { if (isTeacher(ctx)) { userStates[ctx.from.id] = { step: 'W_MAT' }; ctx.reply(msgs.setMatPrompt, Markup.removeKeyboard()); } });
-bot.hears(msgs.buttons.teacher.sendNews, checkPrivate, (ctx) => { if (isTeacher(ctx)) { userStates[ctx.from.id] = { step: 'W_NEWS' }; ctx.reply(msgs.newsPrompt, Markup.removeKeyboard()); } });
-
-// --- ГЛАВНЫЙ ОБРАБОТЧИК СООБЩЕНИЙ ---
 bot.on('message', checkPrivate, async (ctx) => {
-    const userId = ctx.from.id;
-    const state = userStates[userId];
-    if (!state) return ctx.reply(msgs.unknown, mainMenu(ctx));
+    const uid = ctx.from.id;
+    const st = userStates[uid];
+    if (!st) return ctx.reply("⚠ Используйте меню:", getMenu(ctx));
 
-    // Рассылка медиа (Владелец)
-    if (state.step === 'WAITING_BROADCAST') {
-        userStates[userId].msgId = ctx.message.message_id;
-        userStates[userId].step = 'CONF_BROAD';
-        return ctx.reply(msgs.confirmAction, Markup.keyboard([[msgs.buttons.common.confirm, msgs.buttons.common.cancel]]).resize());
-    }
-
-    // Помощь (Учителю)
-    if (state.step === 'SENDING_HELP') {
-        if (ctx.message.text === msgs.buttons.common.finish) { delete userStates[userId]; return ctx.reply(msgs.helpFinished, mainMenu(ctx)); }
-        await bot.telegram.sendMessage(config.TEACHER_ID, msgs.teacherNewHelpAlert(ctx.from.first_name));
-        await ctx.copyMessage(config.TEACHER_ID, { reply_markup: { inline_keyboard: [[{ text: `✍ Ответить ${ctx.from.first_name}`, callback_data: `ans_${userId}_${ctx.from.first_name}` }]] } });
+    // Ученик -> Учителю
+    if (st.step === 'ASKING_TEACHER') {
+        if (ctx.message.text === msgs.buttons.common.finish) { delete userStates[uid]; return ctx.reply("✅ Отправлено учителю.", { parse_mode: 'HTML', ...getMenu(ctx) }); }
+        await bot.telegram.sendMessage(config.TEACHER_ID, msgs.teacherNewHelpAlert(esc(ctx.from.first_name)), { parse_mode: 'HTML' });
+        await ctx.copyMessage(config.TEACHER_ID, { reply_markup: { inline_keyboard: [[{ text: `✍ Ответить ${ctx.from.first_name}`, callback_data: `ans_${uid}_${ctx.from.first_name}` }]] } });
         return;
     }
 
-    // Обратная связь (Владельцу)
-    if (state.step === 'SENDING_FEEDBACK') {
-        if (ctx.message.text === msgs.buttons.common.finish) { delete userStates[userId]; return ctx.reply("✅ Отправлено.", mainMenu(ctx)); }
-        await bot.telegram.sendMessage(config.OWNER_ID, msgs.ownerNewFeedback(ctx.from.first_name));
-        await ctx.copyMessage(config.OWNER_ID);
+    // Ученик -> Владельцу
+    if (st.step === 'ASKING_OWNER') {
+        if (ctx.message.text === msgs.buttons.common.finish) { delete userStates[uid]; return ctx.reply("✅ Отправлено директору.", { parse_mode: 'HTML', ...getMenu(ctx) }); }
+        await bot.telegram.sendMessage(config.OWNER_ID, msgs.ownerNewFeedbackAlert(esc(ctx.from.first_name)), { parse_mode: 'HTML' });
+        await ctx.copyMessage(config.OWNER_ID, { reply_markup: { inline_keyboard: [[{ text: `✍ Ответить ${ctx.from.first_name}`, callback_data: `ans_${uid}_${ctx.from.first_name}` }]] } });
         return;
     }
 
-    // Ответ учителя ученику
-    if (state.step === 'REPLYING') {
-        if (ctx.message.text === msgs.buttons.common.finish) { delete userStates[userId]; return ctx.reply("✅ Диалог закрыт.", mainMenu(ctx)); }
-        if (!state.hSent) { await bot.telegram.sendMessage(state.target, msgs.studentReceivedReplyHeader); userStates[userId].hSent = true; }
-        await ctx.copyMessage(state.target);
+    // Режим ответа
+    if (st.step === 'REPLYING') {
+        if (ctx.message.text === msgs.buttons.common.finish) { delete userStates[uid]; return ctx.reply("✅ Диалог закрыт.", getMenu(ctx)); }
+        if (!st.h) { await bot.telegram.sendMessage(st.target, msgs.replyHeader, { parse_mode: 'HTML' }); userStates[uid].h = true; }
+        await ctx.copyMessage(st.target);
         return;
     }
 
-    // Ввод текстов учителем
-    const inp = { 'W_HW': 'C_HW', 'W_VOC': 'C_VOC', 'W_MAT': 'C_MAT', 'W_NEWS': 'C_NEWS' };
-    if (inp[state.step]) {
-        userStates[userId].data = ctx.message.text;
-        userStates[userId].old = state.step;
-        userStates[userId].step = inp[state.step];
-        return ctx.reply(msgs.confirmAction, Markup.keyboard([[msgs.buttons.common.confirm, msgs.buttons.common.cancel]]).resize());
+    // Рассылка
+    if (st.step === 'WAIT_BROAD') {
+        userStates[uid].msg = ctx.message.message_id;
+        userStates[uid].step = 'CONF_BROAD';
+        return ctx.reply("Подтвердить рассылку?", Markup.keyboard([[msgs.buttons.common.confirm, msgs.buttons.common.cancel]]).resize());
     }
 
-    // Кнопки подтверждения
+    // Подготовка контента (ДЗ и т.д.)
+    const steps = { 'W_HW': 'C_HW', 'W_VOC': 'C_VOC', 'W_MAT': 'C_MAT', 'W_NEWS': 'C_NEWS' };
+    if (steps[st.step]) {
+        userStates[uid].data = ctx.message.text;
+        userStates[uid].old = st.step;
+        userStates[uid].step = steps[st.step];
+        return ctx.reply("Подтвердить обновление?", Markup.keyboard([[msgs.buttons.common.confirm, msgs.buttons.common.cancel]]).resize());
+    }
+
+    // Логика кнопок Да/Нет
     if (ctx.message.text === msgs.buttons.common.confirm) {
-        if (state.step === 'CONF_BROAD') {
-            for (let [uId] of allUsers) { try { await bot.telegram.copyMessage(uId, userId, state.msgId); } catch (e) {} }
-            ctx.reply("✅ Рассылка завершена", mainMenu(ctx));
+        if (st.step === 'CONF_BROAD') {
+            for (let [id] of allUsers) { try { await bot.telegram.copyMessage(id, uid, st.msg); } catch (e) {} }
+            ctx.reply("✅ Рассылка выполнена", getMenu(ctx));
         } else {
-            if (state.old === 'W_HW') currentHomework = state.data;
-            if (state.old === 'W_VOC') currentVocabulary = state.data;
-            if (state.old === 'W_MAT') currentMaterials = state.data;
-            if (state.old === 'W_NEWS') await bot.telegram.sendMessage(config.GROUP_ID, `📢 **НОВОСТИ:**\n\n${state.data}`, { parse_mode: 'Markdown' });
-            ctx.reply("✅ Обновлено", mainMenu(ctx));
+            if (st.old === 'W_HW') currentHomework = st.data;
+            if (st.old === 'W_VOC') currentVocabulary = st.data;
+            if (st.old === 'W_MAT') currentMaterials = state.data;
+            if (st.old === 'W_NEWS') await bot.telegram.sendMessage(config.GROUP_ID, `📢 <b>НОВОСТИ:</b>\n\n${esc(st.data)}`, { parse_mode: 'HTML' });
+            ctx.reply("✅ Готово", getMenu(ctx));
         }
-        delete userStates[userId];
+        delete userStates[uid];
     } else if (ctx.message.text === msgs.buttons.common.cancel) {
-        delete userStates[userId];
-        ctx.reply(msgs.cancelOp, mainMenu(ctx));
+        delete userStates[uid];
+        ctx.reply(msgs.cancelOp, getMenu(ctx));
     }
 });
 
-// Кнопка "Ответить"
 bot.on('callback_query', async (ctx) => {
     const d = ctx.callbackQuery.data;
     if (d.startsWith('ans_')) {
         const p = d.split('_');
-        userStates[ctx.from.id] = { step: 'REPLYING', target: p[1], hSent: false };
-        await bot.telegram.sendMessage(p[1], msgs.studentWait);
-        await ctx.reply(msgs.teacherReplyStart(p[2]), Markup.keyboard([[msgs.buttons.common.finish]]).resize());
+        userStates[ctx.from.id] = { step: 'REPLYING', target: p[1], h: false };
+        await bot.telegram.sendMessage(p[1], "⏳ <b>Учитель/Директор подключается к диалогу...</b>", { parse_mode: 'HTML' });
+        await ctx.reply(`✍ Режим ответа для: <b>${p[2]}</b>. Отправьте сообщение, затем нажмите Завершить.`, { parse_mode: 'HTML', ...Markup.keyboard([[msgs.buttons.common.finish]]).resize() });
     }
     await ctx.answerCbQuery();
 });
 
-bot.launch().then(() => console.log('Bot is running!'));
-
+bot.launch().then(() => console.log('Bot is ready [Fixed HTML]'));
