@@ -112,12 +112,12 @@ bot.on('callback_query', async (ctx) => {
                 parse_mode: 'HTML',
                 ...Markup.inlineKeyboard([
                     [
-                        Markup.button.callback("🔇 Мут", `exec_mute_${userId}`),
-                        Markup.button.callback("🔊 Размут", `exec_unmute_${userId}`)
+                        Markup.button.callback("Мут", `exec_mute_${userId}`),
+                        Markup.button.callback("Размут", `exec_unmute_${userId}`)
                     ],
                     [
-                        Markup.button.callback("🚫 Бан", `exec_ban_${userId}`),
-                        Markup.button.callback("✅ Разбан", `exec_unban_${userId}`)
+                        Markup.button.callback("Бан", `exec_ban_${userId}`),
+                        Markup.button.callback("Разбан", `exec_unban_${userId}`)
                     ]
                 ])
             }
@@ -146,14 +146,14 @@ bot.on('callback_query', async (ctx) => {
             if (action === 'unban')
                 await ctx.telegram.unbanChatMember(config.GROUP_ID, userId);
 
-            await ctx.answerCbQuery(`✔ ${action}`);
+            await ctx.answerCbQuery(action);
             return ctx.editMessageText(
-                `✅ Пользователь ID ${userId}: <b>${action.toUpperCase()}</b>`,
+                `Пользователь ID ${userId}: <b>${action.toUpperCase()}</b>`,
                 { parse_mode: 'HTML' }
             );
         } catch {
             await ctx.answerCbQuery("Ошибка");
-            return ctx.editMessageText("❌ Бот не админ или нет прав.");
+            return ctx.editMessageText("Бот не админ или нет прав.");
         }
     }
 
@@ -170,8 +170,6 @@ bot.on('callback_query', async (ctx) => {
 
     ctx.answerCbQuery();
 });
-
-/* ===== STUDENT BUTTONS ===== */
 
 bot.hears(msgs.buttons.student.homework, checkPrivate, checkMembership,
     (ctx) => ctx.reply(msgs.homeworkDisplay(esc(currentHomework)), { parse_mode: 'HTML' })
@@ -192,12 +190,12 @@ bot.hears(msgs.buttons.student.materials, checkPrivate, checkMembership,
 
 bot.on('message', checkPrivate, async (ctx) => {
     const st = userStates[ctx.from.id];
-    if (!st) return ctx.reply("⚠ Используй меню", getMenu(ctx));
+    if (!st) return ctx.reply("Используй меню", getMenu(ctx));
 
     if (st.step === 'REPLYING') {
         if (ctx.message.text === msgs.buttons.common.finish) {
             delete userStates[ctx.from.id];
-            return ctx.reply("✅ Закрыто", getMenu(ctx));
+            return ctx.reply("Закрыто", getMenu(ctx));
         }
         if (!st.h) {
             await bot.telegram.sendMessage(st.target, msgs.replyHeader, { parse_mode: 'HTML' });
@@ -207,4 +205,4 @@ bot.on('message', checkPrivate, async (ctx) => {
     }
 });
 
-bot.launch().then(() => console.log('✅ Silent Admin Bot Started'));
+bot.launch().then(() => console.log('Silent Admin Bot Started'));
