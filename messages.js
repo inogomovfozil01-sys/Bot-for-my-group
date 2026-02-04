@@ -57,7 +57,7 @@ module.exports = {
         `<b>Новое личное сообщение:</b>\n${name}`,
 
     studentWait:
-        "<b>Ожидайте ответа...</b>",
+        `<b>Ожидайте ответа...</b>`,
 
     teacherReplyStart: (name) =>
         `<b>Вы отвечаете пользователю:</b>\n${name}`,
@@ -75,3 +75,4 @@ module.exports = {
     unknown:
         "Используйте кнопки меню."
 };
+
