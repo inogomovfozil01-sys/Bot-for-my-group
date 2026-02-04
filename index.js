@@ -195,3 +195,41 @@ bot.on('message', checkPrivate, async (ctx) => {
 });
 
 bot.launch().then(() => console.log('Silent Admin Bot Started'));
+
+/* ===== STUDENT ACTIONS ===== */
+
+bot.hears(
+    msgs.buttons.student.homework,
+    checkPrivate,
+    checkMembership,
+    (ctx) =>
+        ctx.reply(
+            msgs.homeworkDisplay(esc(currentHomework)),
+            { parse_mode: 'HTML' }
+        )
+);
+
+bot.hears(
+    msgs.buttons.student.vocabulary,
+    checkPrivate,
+    checkMembership,
+    (ctx) =>
+        ctx.reply(
+            msgs.vocabDisplay(esc(currentVocabulary)),
+            { parse_mode: 'HTML' }
+        )
+);
+
+bot.hears(
+    msgs.buttons.student.materials,
+    checkPrivate,
+    checkMembership,
+    (ctx) =>
+        ctx.reply(
+            msgs.materialsDisplay(esc(currentMaterials)),
+            {
+                parse_mode: 'HTML',
+                disable_web_page_preview: true
+            }
+        )
+);
