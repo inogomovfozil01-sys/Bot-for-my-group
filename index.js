@@ -16,6 +16,9 @@ let currentMaterials = "Пока не добавлено";
 let allUsers = new Map();
 let userStates = {};
 
+// 🔥 ЧАТЫ
+let dialogs = new Map(); // userId -> { with }
+
 /* ===== ROLES ===== */
 const isOwner = (ctx) => ctx.from?.id === config.OWNER_ID;
 const isTeacher = (ctx) =>
@@ -121,9 +124,28 @@ bot.hears(msgs.buttons.teacher.sendNews, (ctx) => {
 });
 
 /* ===== HELP / FEEDBACK ===== */
-bot.hears(msgs.buttons.student.help, checkPrivate, checkMembership, (ctx) => {
-    userStates[ctx.from.id] = { step: 'HELP' };
-    ctx.reply("<b>Напишите сообщение учителю:</b>", { parse_mode: 'HTML' });
+bot.hears(msgs.buttons.student.help, checkPrivate, checkMembership, async (ctx) => {
+    dialogs.set(ctx.from.id, { with: config.TEACHER_ID });
+    dialogs.set(config.TEACHER_ID, { with: ctx.from.id });
+
+    await bot.telegram.sendMessage(
+        config.TEACHER_ID,
+        `<b>Сообщение от ученика:</b>\n\n${ctx.message.text || ''}`,
+        {
+            parse_mode: 'HTML',
+            ...Markup.inlineKeyboard([
+                Markup.button.callback('💬 Ответить', `reply_${ctx.from.id}`)
+            ])
+        }
+    );
+
+    return ctx.reply(
+        "<b>Чат с учителем открыт. Пишите сообщение:</b>",
+        {
+            parse_mode: 'HTML',
+            ...Markup.keyboard([[msgs.buttons.common.finish]]).resize()
+        }
+    );
 });
 
 bot.hears(msgs.buttons.student.feedback, checkPrivate, checkMembership, (ctx) => {
@@ -152,67 +174,60 @@ bot.hears(msgs.buttons.owner.adminPanel, (ctx) => {
 bot.on('callback_query', async (ctx) => {
     const data = ctx.callbackQuery.data;
 
-    if (data.startsWith('manage_')) {
-        const userId = data.split('_')[1];
-        const name = allUsers.get(userId) || "Ученик";
+    if (data.startsWith('reply_')) {
+        const studentId = data.split('_')[1];
 
-        return ctx.editMessageText(
-            msgs.adminUserActions(name),
+        dialogs.set(ctx.from.id, { with: studentId });
+        dialogs.set(studentId, { with: ctx.from.id });
+
+        await bot.telegram.sendMessage(
+            studentId,
+            "<b>Учитель подключился к чату</b>",
             {
                 parse_mode: 'HTML',
-                ...Markup.inlineKeyboard([
-                    [
-                        Markup.button.callback("Мут", `exec_mute_${userId}`),
-                        Markup.button.callback("Размут", `exec_unmute_${userId}`)
-                    ],
-                    [
-                        Markup.button.callback("Бан", `exec_ban_${userId}`),
-                        Markup.button.callback("Разбан", `exec_unban_${userId}`)
-                    ]
-                ])
+                ...Markup.keyboard([[msgs.buttons.common.finish]]).resize()
             }
         );
-    }
 
-    if (data.startsWith('exec_')) {
-        const [, action, userId] = data.split('_');
-        try {
-            if (action === 'mute')
-                await ctx.telegram.restrictChatMember(config.GROUP_ID, userId, { can_send_messages: false });
-            if (action === 'unmute')
-                await ctx.telegram.restrictChatMember(config.GROUP_ID, userId, {
-                    can_send_messages: true,
-                    can_send_media_messages: true,
-                    can_send_other_messages: true,
-                    can_add_web_page_previews: true
-                });
-            if (action === 'ban')
-                await ctx.telegram.banChatMember(config.GROUP_ID, userId);
-            if (action === 'unban')
-                await ctx.telegram.unbanChatMember(config.GROUP_ID, userId);
+        await ctx.reply(
+            "<b>Чат с учеником открыт</b>",
+            {
+                parse_mode: 'HTML',
+                ...Markup.keyboard([[msgs.buttons.common.finish]]).resize()
+            }
+        );
 
-            await ctx.answerCbQuery("Готово");
-            return ctx.editMessageText(`<b>Действие выполнено</b>`, { parse_mode: 'HTML' });
-        } catch {
-            await ctx.answerCbQuery("Ошибка");
-        }
-    }
-
-    if (data.startsWith('ans_')) {
-        const [, target, name] = data.split('_');
-        userStates[ctx.from.id] = { step: 'REPLY', target, h: false };
-
-        await bot.telegram.sendMessage(target, msgs.studentWait, { parse_mode: 'HTML' });
-        await ctx.reply(msgs.teacherReplyStart(name), {
-            parse_mode: 'HTML',
-            ...Markup.keyboard([[msgs.buttons.common.finish]]).resize()
-        });
         return ctx.answerCbQuery();
     }
 });
 
 /* ===== MESSAGE HANDLER ===== */
 bot.on('message', async (ctx) => {
+
+    // 🔥 ЧАТ
+    if (dialogs.has(ctx.from.id)) {
+        const dialog = dialogs.get(ctx.from.id);
+
+        if (ctx.message.text === msgs.buttons.common.finish) {
+            dialogs.delete(ctx.from.id);
+            dialogs.delete(dialog.with);
+
+            await bot.telegram.sendMessage(
+                dialog.with,
+                "<b>Диалог завершён</b>",
+                { parse_mode: 'HTML', ...getMenu(ctx) }
+            );
+
+            return ctx.reply(
+                "<b>Диалог завершён</b>",
+                { parse_mode: 'HTML', ...getMenu(ctx) }
+            );
+        }
+
+        await ctx.telegram.sendChatAction(dialog.with, 'typing');
+        return ctx.copyMessage(dialog.with);
+    }
+
     const st = userStates[ctx.from.id];
     if (!st) return;
 
@@ -231,28 +246,10 @@ bot.on('message', async (ctx) => {
         return ctx.reply("Отправлено", { ...getMenu(ctx) });
     }
 
-    if (st.step === 'HELP') {
-        await bot.telegram.sendMessage(config.TEACHER_ID, ctx.message.text);
-        delete userStates[ctx.from.id];
-        return ctx.reply(msgs.studentWait, { parse_mode: 'HTML', ...getMenu(ctx) });
-    }
-
     if (st.step === 'FEEDBACK') {
         await bot.telegram.sendMessage(config.OWNER_ID, ctx.message.text);
         delete userStates[ctx.from.id];
         return ctx.reply(msgs.studentWait, { parse_mode: 'HTML', ...getMenu(ctx) });
-    }
-
-    if (st.step === 'REPLY') {
-        if (ctx.message.text === msgs.buttons.common.finish) {
-            delete userStates[ctx.from.id];
-            return ctx.reply(msgs.cancelOp, { parse_mode: 'HTML', ...getMenu(ctx) });
-        }
-        if (!st.h) {
-            await bot.telegram.sendMessage(st.target, msgs.replyHeader, { parse_mode: 'HTML' });
-            st.h = true;
-        }
-        return ctx.copyMessage(st.target);
     }
 });
 
