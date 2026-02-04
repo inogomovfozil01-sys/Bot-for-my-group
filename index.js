@@ -4,18 +4,24 @@ const msgs = require('./messages');
 
 const bot = new Telegraf(config.TOKEN);
 
+/* ===== UTILS ===== */
 const esc = (str = '') =>
     str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/* ===== DATA ===== */
+let currentHomework = "Пока не задано";
+let currentVocabulary = "Пока не добавлено";
+let currentMaterials = "Пока не добавлено";
 
 let allUsers = new Map();
 let userStates = {};
 
+/* ===== ROLES ===== */
 const isOwner = (ctx) => ctx.from?.id === config.OWNER_ID;
 const isTeacher = (ctx) =>
     ctx.from && (ctx.from.id === config.TEACHER_ID || ctx.from.id === config.OWNER_ID);
 
 /* ===== MIDDLEWARE ===== */
-
 const checkPrivate = async (ctx, next) => {
     if (ctx.chat?.type !== 'private') return;
     if (ctx.from) {
@@ -37,7 +43,6 @@ const checkMembership = async (ctx, next) => {
 };
 
 /* ===== MENU ===== */
-
 const getMenu = (ctx) => {
     if (isOwner(ctx)) {
         return Markup.keyboard([
@@ -63,173 +68,192 @@ const getMenu = (ctx) => {
 };
 
 /* ===== START ===== */
-
 bot.start(checkPrivate, checkMembership, (ctx) => {
-    const txt = isOwner(ctx)
+    const text = isOwner(ctx)
         ? msgs.ownerMenu
         : isTeacher(ctx)
         ? msgs.teacherMenu
         : msgs.studentMenu;
 
-    ctx.reply(txt, { parse_mode: 'HTML', ...getMenu(ctx) });
+    ctx.reply(text, { parse_mode: 'HTML', ...getMenu(ctx) });
 });
 
-/* ===== HELP TO TEACHER ===== */
+/* ===== STUDENT VIEW ===== */
+bot.hears(msgs.buttons.student.homework, checkPrivate, checkMembership, (ctx) =>
+    ctx.reply(msgs.homeworkDisplay(esc(currentHomework)), { parse_mode: 'HTML' })
+);
 
+bot.hears(msgs.buttons.student.vocabulary, checkPrivate, checkMembership, (ctx) =>
+    ctx.reply(msgs.vocabDisplay(esc(currentVocabulary)), { parse_mode: 'HTML' })
+);
+
+bot.hears(msgs.buttons.student.materials, checkPrivate, checkMembership, (ctx) =>
+    ctx.reply(msgs.materialsDisplay(esc(currentMaterials)), {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true
+    })
+);
+
+/* ===== TEACHER SET ===== */
+bot.hears(msgs.buttons.teacher.setHomework, (ctx) => {
+    if (!isTeacher(ctx)) return;
+    userStates[ctx.from.id] = { step: 'SET_HW' };
+    ctx.reply("<b>Введите ДЗ:</b>", { parse_mode: 'HTML' });
+});
+
+bot.hears(msgs.buttons.teacher.setVocabulary, (ctx) => {
+    if (!isTeacher(ctx)) return;
+    userStates[ctx.from.id] = { step: 'SET_VOCAB' };
+    ctx.reply("<b>Введите новые слова:</b>", { parse_mode: 'HTML' });
+});
+
+bot.hears(msgs.buttons.teacher.setMaterials, (ctx) => {
+    if (!isTeacher(ctx)) return;
+    userStates[ctx.from.id] = { step: 'SET_MAT' };
+    ctx.reply("<b>Введите материалы:</b>", { parse_mode: 'HTML' });
+});
+
+/* ===== SEND NEWS ===== */
+bot.hears(msgs.buttons.teacher.sendNews, (ctx) => {
+    if (!isTeacher(ctx)) return;
+    userStates[ctx.from.id] = { step: 'NEWS' };
+    ctx.reply("<b>Введите сообщение для группы:</b>", { parse_mode: 'HTML' });
+});
+
+/* ===== HELP / FEEDBACK ===== */
 bot.hears(msgs.buttons.student.help, checkPrivate, checkMembership, (ctx) => {
     userStates[ctx.from.id] = { step: 'HELP' };
     ctx.reply("<b>Напишите сообщение учителю:</b>", { parse_mode: 'HTML' });
 });
-
-/* ===== FEEDBACK TO OWNER ===== */
 
 bot.hears(msgs.buttons.student.feedback, checkPrivate, checkMembership, (ctx) => {
     userStates[ctx.from.id] = { step: 'FEEDBACK' };
     ctx.reply("<b>Напишите сообщение директору:</b>", { parse_mode: 'HTML' });
 });
 
-/* ===== CALLBACKS ===== */
+/* ===== ADMIN PANEL ===== */
+bot.hears(msgs.buttons.owner.adminPanel, (ctx) => {
+    if (!isOwner(ctx)) return;
 
+    const buttons = [];
+    for (const [id, name] of allUsers) {
+        if (![config.OWNER_ID, config.TEACHER_ID].includes(Number(id))) {
+            buttons.push([Markup.button.callback(name, `manage_${id}`)]);
+        }
+    }
+
+    ctx.reply(msgs.adminSelectUser, {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard(buttons)
+    });
+});
+
+/* ===== CALLBACKS ===== */
 bot.on('callback_query', async (ctx) => {
     const data = ctx.callbackQuery.data;
 
-    if (data.startsWith('ans_')) {
-        const [, target, name] = data.split('_');
-        userStates[ctx.from.id] = { step: 'REPLYING', target, h: false };
+    if (data.startsWith('manage_')) {
+        const userId = data.split('_')[1];
+        const name = allUsers.get(userId) || "Ученик";
 
-        await bot.telegram.sendMessage(
-            target,
-            msgs.studentWait,
-            { parse_mode: 'HTML' }
-        );
-
-        await ctx.reply(
-            msgs.teacherReplyStart(name),
+        return ctx.editMessageText(
+            msgs.adminUserActions(name),
             {
                 parse_mode: 'HTML',
-                ...Markup.keyboard([[msgs.buttons.common.finish]]).resize()
+                ...Markup.inlineKeyboard([
+                    [
+                        Markup.button.callback("Мут", `exec_mute_${userId}`),
+                        Markup.button.callback("Размут", `exec_unmute_${userId}`)
+                    ],
+                    [
+                        Markup.button.callback("Бан", `exec_ban_${userId}`),
+                        Markup.button.callback("Разбан", `exec_unban_${userId}`)
+                    ]
+                ])
             }
         );
-        return ctx.answerCbQuery();
     }
 
-    ctx.answerCbQuery();
+    if (data.startsWith('exec_')) {
+        const [, action, userId] = data.split('_');
+        try {
+            if (action === 'mute')
+                await ctx.telegram.restrictChatMember(config.GROUP_ID, userId, { can_send_messages: false });
+            if (action === 'unmute')
+                await ctx.telegram.restrictChatMember(config.GROUP_ID, userId, {
+                    can_send_messages: true,
+                    can_send_media_messages: true,
+                    can_send_other_messages: true,
+                    can_add_web_page_previews: true
+                });
+            if (action === 'ban')
+                await ctx.telegram.banChatMember(config.GROUP_ID, userId);
+            if (action === 'unban')
+                await ctx.telegram.unbanChatMember(config.GROUP_ID, userId);
+
+            await ctx.answerCbQuery("Готово");
+            return ctx.editMessageText(`<b>Действие выполнено</b>`, { parse_mode: 'HTML' });
+        } catch {
+            await ctx.answerCbQuery("Ошибка");
+        }
+    }
+
+    if (data.startsWith('ans_')) {
+        const [, target, name] = data.split('_');
+        userStates[ctx.from.id] = { step: 'REPLY', target, h: false };
+
+        await bot.telegram.sendMessage(target, msgs.studentWait, { parse_mode: 'HTML' });
+        await ctx.reply(msgs.teacherReplyStart(name), {
+            parse_mode: 'HTML',
+            ...Markup.keyboard([[msgs.buttons.common.finish]]).resize()
+        });
+        return ctx.answerCbQuery();
+    }
 });
 
 /* ===== MESSAGE HANDLER ===== */
-
-bot.on('message', checkPrivate, async (ctx) => {
+bot.on('message', async (ctx) => {
     const st = userStates[ctx.from.id];
-    if (!st) {
-        return ctx.reply(
-            msgs.unknown,
-            { parse_mode: 'HTML', ...getMenu(ctx) }
-        );
+    if (!st) return;
+
+    if (st.step === 'SET_HW') currentHomework = ctx.message.text;
+    if (st.step === 'SET_VOCAB') currentVocabulary = ctx.message.text;
+    if (st.step === 'SET_MAT') currentMaterials = ctx.message.text;
+
+    if (['SET_HW', 'SET_VOCAB', 'SET_MAT'].includes(st.step)) {
+        delete userStates[ctx.from.id];
+        return ctx.reply("Сохранено", { ...getMenu(ctx) });
     }
 
-    /* === УЧИТЕЛЮ === */
+    if (st.step === 'NEWS') {
+        await bot.telegram.sendMessage(config.GROUP_ID, ctx.message.text);
+        delete userStates[ctx.from.id];
+        return ctx.reply("Отправлено", { ...getMenu(ctx) });
+    }
+
     if (st.step === 'HELP') {
-        const name = allUsers.get(ctx.from.id.toString()) || "Ученик";
-
-        await bot.telegram.sendMessage(
-            config.TEACHER_ID,
-            `${msgs.teacherNewHelpAlert(name)}\n\n${esc(ctx.message.text)}`,
-            {
-                parse_mode: 'HTML',
-                ...Markup.inlineKeyboard([
-                    [Markup.button.callback("Ответить", `ans_${ctx.from.id}_${name}`)]
-                ])
-            }
-        );
-
+        await bot.telegram.sendMessage(config.TEACHER_ID, ctx.message.text);
         delete userStates[ctx.from.id];
-        return ctx.reply(
-            msgs.studentWait,
-            { parse_mode: 'HTML', ...getMenu(ctx) }
-        );
+        return ctx.reply(msgs.studentWait, { parse_mode: 'HTML', ...getMenu(ctx) });
     }
 
-    /* === ДИРЕКТОРУ === */
     if (st.step === 'FEEDBACK') {
-        const name = allUsers.get(ctx.from.id.toString()) || "Ученик";
-
-        await bot.telegram.sendMessage(
-            config.OWNER_ID,
-            `${msgs.ownerNewFeedbackAlert(name)}\n\n${esc(ctx.message.text)}`,
-            {
-                parse_mode: 'HTML',
-                ...Markup.inlineKeyboard([
-                    [Markup.button.callback("Ответить", `ans_${ctx.from.id}_${name}`)]
-                ])
-            }
-        );
-
+        await bot.telegram.sendMessage(config.OWNER_ID, ctx.message.text);
         delete userStates[ctx.from.id];
-        return ctx.reply(
-            msgs.studentWait,
-            { parse_mode: 'HTML', ...getMenu(ctx) }
-        );
+        return ctx.reply(msgs.studentWait, { parse_mode: 'HTML', ...getMenu(ctx) });
     }
 
-    /* === ОТВЕТ === */
-    if (st.step === 'REPLYING') {
+    if (st.step === 'REPLY') {
         if (ctx.message.text === msgs.buttons.common.finish) {
             delete userStates[ctx.from.id];
-            return ctx.reply(
-                msgs.cancelOp,
-                { parse_mode: 'HTML', ...getMenu(ctx) }
-            );
+            return ctx.reply(msgs.cancelOp, { parse_mode: 'HTML', ...getMenu(ctx) });
         }
-
         if (!st.h) {
-            await bot.telegram.sendMessage(
-                st.target,
-                msgs.replyHeader,
-                { parse_mode: 'HTML' }
-            );
+            await bot.telegram.sendMessage(st.target, msgs.replyHeader, { parse_mode: 'HTML' });
             st.h = true;
         }
-
         return ctx.copyMessage(st.target);
     }
 });
 
-bot.launch().then(() => console.log('Silent Admin Bot Started'));
-
-/* ===== STUDENT ACTIONS ===== */
-
-bot.hears(
-    msgs.buttons.student.homework,
-    checkPrivate,
-    checkMembership,
-    (ctx) =>
-        ctx.reply(
-            msgs.homeworkDisplay(esc(currentHomework)),
-            { parse_mode: 'HTML' }
-        )
-);
-
-bot.hears(
-    msgs.buttons.student.vocabulary,
-    checkPrivate,
-    checkMembership,
-    (ctx) =>
-        ctx.reply(
-            msgs.vocabDisplay(esc(currentVocabulary)),
-            { parse_mode: 'HTML' }
-        )
-);
-
-bot.hears(
-    msgs.buttons.student.materials,
-    checkPrivate,
-    checkMembership,
-    (ctx) =>
-        ctx.reply(
-            msgs.materialsDisplay(esc(currentMaterials)),
-            {
-                parse_mode: 'HTML',
-                disable_web_page_preview: true
-            }
-        )
-);
+bot.launch().then(() => console.log('BOT STARTED'));
