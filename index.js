@@ -78,11 +78,18 @@ bot.start(checkPrivate, checkMembership, (ctx) => {
     ctx.reply(txt, { parse_mode: 'HTML', ...getMenu(ctx) });
 });
 
+/* ===== HELP TO TEACHER ===== */
+
+bot.hears(msgs.buttons.student.help, checkPrivate, checkMembership, (ctx) => {
+    userStates[ctx.from.id] = { step: 'HELP' };
+    ctx.reply("<b>Напишите сообщение учителю:</b>", { parse_mode: 'HTML' });
+});
+
 /* ===== ADMIN PANEL ===== */
 
 bot.hears(msgs.buttons.owner.adminPanel, checkPrivate, (ctx) => {
     if (!isOwner(ctx)) return;
-    if (!allUsers.size) return ctx.reply("Список учеников пуст.");
+    if (!allUsers.size) return ctx.reply(msgs.unknown);
 
     const buttons = [];
     for (const [id, name] of allUsers) {
@@ -128,9 +135,7 @@ bot.on('callback_query', async (ctx) => {
         const [, action, userId] = data.split('_');
         try {
             if (action === 'mute')
-                await ctx.telegram.restrictChatMember(config.GROUP_ID, userId, {
-                    can_send_messages: false
-                });
+                await ctx.telegram.restrictChatMember(config.GROUP_ID, userId, { can_send_messages: false });
 
             if (action === 'unmute')
                 await ctx.telegram.restrictChatMember(config.GROUP_ID, userId, {
@@ -146,20 +151,21 @@ bot.on('callback_query', async (ctx) => {
             if (action === 'unban')
                 await ctx.telegram.unbanChatMember(config.GROUP_ID, userId);
 
-            await ctx.answerCbQuery(action);
+            await ctx.answerCbQuery("Готово");
             return ctx.editMessageText(
-                `Пользователь ID ${userId}: <b>${action.toUpperCase()}</b>`,
+                `<b>Действие выполнено</b>\nID: ${userId}`,
                 { parse_mode: 'HTML' }
             );
         } catch {
             await ctx.answerCbQuery("Ошибка");
-            return ctx.editMessageText("Бот не админ или нет прав.");
+            return ctx.editMessageText(msgs.unknown);
         }
     }
 
     if (data.startsWith('ans_')) {
         const [, target, name] = data.split('_');
         userStates[ctx.from.id] = { step: 'REPLYING', target, h: false };
+
         await bot.telegram.sendMessage(target, msgs.studentWait, { parse_mode: 'HTML' });
         await ctx.reply(
             msgs.teacherReplyStart(name),
@@ -170,6 +176,8 @@ bot.on('callback_query', async (ctx) => {
 
     ctx.answerCbQuery();
 });
+
+/* ===== STUDENT ACTIONS ===== */
 
 bot.hears(msgs.buttons.student.homework, checkPrivate, checkMembership,
     (ctx) => ctx.reply(msgs.homeworkDisplay(esc(currentHomework)), { parse_mode: 'HTML' })
@@ -190,12 +198,36 @@ bot.hears(msgs.buttons.student.materials, checkPrivate, checkMembership,
 
 bot.on('message', checkPrivate, async (ctx) => {
     const st = userStates[ctx.from.id];
-    if (!st) return ctx.reply("Используй меню", getMenu(ctx));
+    if (!st) return ctx.reply(msgs.unknown, getMenu(ctx));
+
+    if (st.step === 'HELP') {
+        const studentName =
+            `${esc(ctx.from.first_name)}${ctx.from.username ? ` (@${ctx.from.username})` : ''}`;
+
+        await bot.telegram.sendMessage(
+            config.TEACHER_ID,
+            `${msgs.teacherNewHelpAlert(studentName)}\n\n${esc(ctx.message.text)}`,
+            {
+                parse_mode: 'HTML',
+                ...Markup.inlineKeyboard([
+                    [
+                        Markup.button.callback(
+                            "Ответить",
+                            `ans_${ctx.from.id}_${studentName}`
+                        )
+                    ]
+                ])
+            }
+        );
+
+        delete userStates[ctx.from.id];
+        return ctx.reply(msgs.studentWait, getMenu(ctx));
+    }
 
     if (st.step === 'REPLYING') {
         if (ctx.message.text === msgs.buttons.common.finish) {
             delete userStates[ctx.from.id];
-            return ctx.reply("Закрыто", getMenu(ctx));
+            return ctx.reply(msgs.cancelOp, getMenu(ctx));
         }
         if (!st.h) {
             await bot.telegram.sendMessage(st.target, msgs.replyHeader, { parse_mode: 'HTML' });
@@ -206,4 +238,3 @@ bot.on('message', checkPrivate, async (ctx) => {
 });
 
 bot.launch().then(() => console.log('Silent Admin Bot Started'));
-
