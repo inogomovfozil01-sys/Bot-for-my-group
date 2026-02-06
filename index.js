@@ -4,27 +4,23 @@ const msgs = require('./messages');
 
 const bot = new Telegraf(config.TOKEN);
 
-/* ===== UTILS ===== */
 const esc = (str = '') =>
     str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-/* ===== DATA ===== */
 let currentHomework = "Пока не задано";
 let currentVocabulary = "Пока не добавлено";
 let currentMaterials = "Пока не добавлено";
 
 let allUsers = new Map();
 let userStates = {};
+let lastMessages = {};
 
-// 🔥 ЧАТЫ
-let dialogs = new Map(); // userId -> { with }
+let dialogs = new Map();
 
-/* ===== ROLES ===== */
 const isOwner = (ctx) => ctx.from?.id === config.OWNER_ID;
 const isTeacher = (ctx) =>
     ctx.from && (ctx.from.id === config.TEACHER_ID || ctx.from.id === config.OWNER_ID);
 
-/* ===== MIDDLEWARE ===== */
 const checkPrivate = async (ctx, next) => {
     if (ctx.chat?.type !== 'private') return;
     if (ctx.from) {
@@ -45,7 +41,6 @@ const checkMembership = async (ctx, next) => {
     return ctx.reply(msgs.accessDenied, { parse_mode: 'HTML' });
 };
 
-/* ===== MENU ===== */
 const getMenu = (ctx) => {
     if (isOwner(ctx)) {
         return Markup.keyboard([
@@ -70,7 +65,6 @@ const getMenu = (ctx) => {
     ]).resize();
 };
 
-/* ===== START ===== */
 bot.start(checkPrivate, checkMembership, (ctx) => {
     const text = isOwner(ctx)
         ? msgs.ownerMenu
@@ -81,7 +75,6 @@ bot.start(checkPrivate, checkMembership, (ctx) => {
     ctx.reply(text, { parse_mode: 'HTML', ...getMenu(ctx) });
 });
 
-/* ===== STUDENT VIEW ===== */
 bot.hears(msgs.buttons.student.homework, checkPrivate, checkMembership, (ctx) =>
     ctx.reply(msgs.homeworkDisplay(esc(currentHomework)), { parse_mode: 'HTML' })
 );
@@ -97,7 +90,6 @@ bot.hears(msgs.buttons.student.materials, checkPrivate, checkMembership, (ctx) =
     })
 );
 
-/* ===== TEACHER SET ===== */
 bot.hears(msgs.buttons.teacher.setHomework, (ctx) => {
     if (!isTeacher(ctx)) return;
     userStates[ctx.from.id] = { step: 'SET_HW' };
@@ -116,14 +108,12 @@ bot.hears(msgs.buttons.teacher.setMaterials, (ctx) => {
     ctx.reply("<b>Введите материалы:</b>", { parse_mode: 'HTML' });
 });
 
-/* ===== SEND NEWS ===== */
 bot.hears(msgs.buttons.teacher.sendNews, (ctx) => {
     if (!isTeacher(ctx)) return;
     userStates[ctx.from.id] = { step: 'NEWS' };
     ctx.reply("<b>Введите сообщение для группы:</b>", { parse_mode: 'HTML' });
 });
 
-/* ===== HELP / FEEDBACK ===== */
 bot.hears(msgs.buttons.student.help, checkPrivate, checkMembership, async (ctx) => {
     dialogs.set(ctx.from.id, { with: config.TEACHER_ID });
     dialogs.set(config.TEACHER_ID, { with: ctx.from.id });
@@ -153,7 +143,6 @@ bot.hears(msgs.buttons.student.feedback, checkPrivate, checkMembership, (ctx) =>
     ctx.reply("<b>Напишите сообщение директору:</b>", { parse_mode: 'HTML' });
 });
 
-/* ===== ADMIN PANEL ===== */
 bot.hears(msgs.buttons.owner.adminPanel, (ctx) => {
     if (!isOwner(ctx)) return;
 
@@ -170,7 +159,6 @@ bot.hears(msgs.buttons.owner.adminPanel, (ctx) => {
     });
 });
 
-/* ===== CALLBACKS ===== */
 bot.on('callback_query', async (ctx) => {
     const data = ctx.callbackQuery.data;
 
@@ -199,12 +187,74 @@ bot.on('callback_query', async (ctx) => {
 
         return ctx.answerCbQuery();
     }
+
+    if (data.startsWith('manage_')) {
+        const userId = data.split('_')[1];
+        const name = allUsers.get(userId) || "Ученик";
+
+        return ctx.editMessageText(msgs.adminUserActions(name), {
+            parse_mode: 'HTML',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('Мут', `mute_${userId}`), Markup.button.callback('Бан', `ban_${userId}`)],
+                [Markup.button.callback('Размут', `unmute_${userId}`), Markup.button.callback('Разбан', `unban_${userId}`)],
+                [Markup.button.callback('Удалить последнее сообщение', `delmsg_${userId}`)],
+                [Markup.button.callback('Выгнать', `kick_${userId}`)],
+                [Markup.button.callback('Назад', 'back_to_admin')]
+            ])
+        });
+    }
+
+    if (data === 'back_to_admin') {
+        const buttons = [];
+        for (const [id, name] of allUsers) {
+            if (![config.OWNER_ID, config.TEACHER_ID].includes(Number(id))) {
+                buttons.push([Markup.button.callback(name, `manage_${id}`)]);
+            }
+        }
+        return ctx.editMessageText(msgs.adminSelectUser, {
+            parse_mode: 'HTML',
+            ...Markup.inlineKeyboard(buttons)
+        });
+    }
+
+    const [action, targetId] = data.split('_');
+    try {
+        if (action === 'mute') {
+            await ctx.telegram.restrictChatMember(config.GROUP_ID, targetId, { can_send_messages: false });
+            await ctx.answerCbQuery('Пользователь замучен');
+        } else if (action === 'ban') {
+            await ctx.telegram.banChatMember(config.GROUP_ID, targetId);
+            await ctx.answerCbQuery('Пользователь забанен');
+        } else if (action === 'unmute') {
+            await ctx.telegram.restrictChatMember(config.GROUP_ID, targetId, { 
+                can_send_messages: true, can_send_media_messages: true, can_send_polls: true, can_send_other_messages: true, can_add_web_page_previews: true 
+            });
+            await ctx.answerCbQuery('Пользователь размучен');
+        } else if (action === 'unban') {
+            await ctx.telegram.unbanChatMember(config.GROUP_ID, targetId, { only_if_banned: true });
+            await ctx.answerCbQuery('Пользователь разбанен');
+        } else if (action === 'kick') {
+            await ctx.telegram.banChatMember(config.GROUP_ID, targetId);
+            await ctx.telegram.unbanChatMember(config.GROUP_ID, targetId);
+            await ctx.answerCbQuery('Пользователь исключен');
+        } else if (action === 'delmsg') {
+            if (lastMessages[targetId]) {
+                await ctx.telegram.deleteMessage(config.GROUP_ID, lastMessages[targetId]);
+                await ctx.answerCbQuery('Сообщение удалено');
+            } else {
+                await ctx.answerCbQuery('Нет данных о сообщениях', { show_alert: true });
+            }
+        }
+    } catch (e) {
+        await ctx.answerCbQuery('Ошибка: ' + e.message, { show_alert: true });
+    }
 });
 
-/* ===== MESSAGE HANDLER ===== */
 bot.on('message', async (ctx) => {
+    if (ctx.chat.id.toString() === config.GROUP_ID.toString() && ctx.from) {
+        lastMessages[ctx.from.id] = ctx.message.message_id;
+    }
 
-    // 🔥 ЧАТ
     if (dialogs.has(ctx.from.id)) {
         const dialog = dialogs.get(ctx.from.id);
 
