@@ -53,8 +53,8 @@ const getMenu = (ctx) => {
 
     if (isTeacher(ctx)) {
         return Markup.keyboard([
-            [msgs.buttons.teacher.setHomework, msgs.buttons.teacher.setVocabulary],
-            [msgs.buttons.teacher.setMaterials, msgs.buttons.teacher.sendNews]
+            [msgs.buttons.teacher.setHomework, msgs.buttons.teacher.setVocabulary, msgs.buttons.teacher.setMaterials],
+            [msgs.buttons.teacher.sendNews, msgs.buttons.owner.adminPanel]
         ]).resize();
     }
 
@@ -144,7 +144,7 @@ bot.hears(msgs.buttons.student.feedback, checkPrivate, checkMembership, (ctx) =>
 });
 
 bot.hears(msgs.buttons.owner.adminPanel, (ctx) => {
-    if (!isOwner(ctx)) return;
+    if (!isTeacher(ctx)) return;
 
     const buttons = [];
     for (const [id, name] of allUsers) {
@@ -178,6 +178,7 @@ bot.on('callback_query', async (ctx) => {
     }
 
     if (data.startsWith('manage_')) {
+        if (!isTeacher(ctx)) return ctx.answerCbQuery('Нет доступа');
         const userId = data.split('_')[1];
         const name = allUsers.get(userId) || "Ученик";
         return ctx.editMessageText(msgs.adminUserActions(name), {
@@ -193,6 +194,7 @@ bot.on('callback_query', async (ctx) => {
     }
 
     if (data === 'back_to_admin') {
+        if (!isTeacher(ctx)) return ctx.answerCbQuery();
         const buttons = [];
         for (const [id, name] of allUsers) {
             if (![config.OWNER_ID, config.TEACHER_ID].includes(Number(id))) {
@@ -206,6 +208,10 @@ bot.on('callback_query', async (ctx) => {
     }
 
     const [action, targetId] = data.split('_');
+    if (!['mute', 'unmute', 'ban', 'unban', 'kick', 'delmsg'].includes(action)) return;
+    
+    if (!isTeacher(ctx)) return ctx.answerCbQuery('Нет доступа');
+
     try {
         if (action === 'mute') {
             await ctx.telegram.restrictChatMember(config.GROUP_ID, targetId, { permissions: { can_send_messages: false } });
