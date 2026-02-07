@@ -13,7 +13,7 @@ let currentMaterials = "Пока не добавлено";
 
 let allUsers = new Map();
 let userStates = {};
-let lastMessages = {};
+let lastGroupMessages = new Map();
 
 let dialogs = new Map();
 
@@ -164,34 +164,22 @@ bot.on('callback_query', async (ctx) => {
 
     if (data.startsWith('reply_')) {
         const studentId = data.split('_')[1];
-
         dialogs.set(ctx.from.id, { with: studentId });
         dialogs.set(studentId, { with: ctx.from.id });
-
-        await bot.telegram.sendMessage(
-            studentId,
-            "<b>Учитель подключился к чату</b>",
-            {
-                parse_mode: 'HTML',
-                ...Markup.keyboard([[msgs.buttons.common.finish]]).resize()
-            }
-        );
-
-        await ctx.reply(
-            "<b>Чат с учеником открыт</b>",
-            {
-                parse_mode: 'HTML',
-                ...Markup.keyboard([[msgs.buttons.common.finish]]).resize()
-            }
-        );
-
+        await bot.telegram.sendMessage(studentId, "<b>Учитель подключился к чату</b>", {
+            parse_mode: 'HTML',
+            ...Markup.keyboard([[msgs.buttons.common.finish]]).resize()
+        });
+        await ctx.reply("<b>Чат с учеником открыт</b>", {
+            parse_mode: 'HTML',
+            ...Markup.keyboard([[msgs.buttons.common.finish]]).resize()
+        });
         return ctx.answerCbQuery();
     }
 
     if (data.startsWith('manage_')) {
         const userId = data.split('_')[1];
         const name = allUsers.get(userId) || "Ученик";
-
         return ctx.editMessageText(msgs.adminUserActions(name), {
             parse_mode: 'HTML',
             ...Markup.inlineKeyboard([
@@ -220,29 +208,30 @@ bot.on('callback_query', async (ctx) => {
     const [action, targetId] = data.split('_');
     try {
         if (action === 'mute') {
-            await ctx.telegram.restrictChatMember(config.GROUP_ID, targetId, { can_send_messages: false });
-            await ctx.answerCbQuery('Пользователь замучен');
-        } else if (action === 'ban') {
-            await ctx.telegram.banChatMember(config.GROUP_ID, targetId);
-            await ctx.answerCbQuery('Пользователь забанен');
+            await ctx.telegram.restrictChatMember(config.GROUP_ID, targetId, { permissions: { can_send_messages: false } });
+            await ctx.answerCbQuery('Мут установлен');
         } else if (action === 'unmute') {
             await ctx.telegram.restrictChatMember(config.GROUP_ID, targetId, { 
-                can_send_messages: true, can_send_media_messages: true, can_send_polls: true, can_send_other_messages: true, can_add_web_page_previews: true 
+                permissions: { can_send_messages: true, can_send_media_messages: true, can_send_other_messages: true, can_add_web_page_previews: true } 
             });
-            await ctx.answerCbQuery('Пользователь размучен');
+            await ctx.answerCbQuery('Мут снят');
+        } else if (action === 'ban') {
+            await ctx.telegram.banChatMember(config.GROUP_ID, targetId);
+            await ctx.answerCbQuery('Забанен');
         } else if (action === 'unban') {
             await ctx.telegram.unbanChatMember(config.GROUP_ID, targetId, { only_if_banned: true });
-            await ctx.answerCbQuery('Пользователь разбанен');
+            await ctx.answerCbQuery('Разбанен');
         } else if (action === 'kick') {
             await ctx.telegram.banChatMember(config.GROUP_ID, targetId);
             await ctx.telegram.unbanChatMember(config.GROUP_ID, targetId);
-            await ctx.answerCbQuery('Пользователь исключен');
+            await ctx.answerCbQuery('Исключен');
         } else if (action === 'delmsg') {
-            if (lastMessages[targetId]) {
-                await ctx.telegram.deleteMessage(config.GROUP_ID, lastMessages[targetId]);
+            const lastId = lastGroupMessages.get(targetId);
+            if (lastId) {
+                await ctx.telegram.deleteMessage(config.GROUP_ID, lastId);
                 await ctx.answerCbQuery('Сообщение удалено');
             } else {
-                await ctx.answerCbQuery('Нет данных о сообщениях', { show_alert: true });
+                await ctx.answerCbQuery('Сообщение не найдено', { show_alert: true });
             }
         }
     } catch (e) {
@@ -251,29 +240,19 @@ bot.on('callback_query', async (ctx) => {
 });
 
 bot.on('message', async (ctx) => {
-    if (ctx.chat.id.toString() === config.GROUP_ID.toString() && ctx.from) {
-        lastMessages[ctx.from.id] = ctx.message.message_id;
+    if (ctx.chat.id.toString() === config.GROUP_ID.toString()) {
+        if (ctx.from) lastGroupMessages.set(ctx.from.id.toString(), ctx.message.message_id);
+        return;
     }
 
     if (dialogs.has(ctx.from.id)) {
         const dialog = dialogs.get(ctx.from.id);
-
         if (ctx.message.text === msgs.buttons.common.finish) {
             dialogs.delete(ctx.from.id);
             dialogs.delete(dialog.with);
-
-            await bot.telegram.sendMessage(
-                dialog.with,
-                "<b>Диалог завершён</b>",
-                { parse_mode: 'HTML', ...getMenu(ctx) }
-            );
-
-            return ctx.reply(
-                "<b>Диалог завершён</b>",
-                { parse_mode: 'HTML', ...getMenu(ctx) }
-            );
+            await bot.telegram.sendMessage(dialog.with, "<b>Диалог завершён</b>", { parse_mode: 'HTML', ...getMenu(ctx) });
+            return ctx.reply("<b>Диалог завершён</b>", { parse_mode: 'HTML', ...getMenu(ctx) });
         }
-
         await ctx.telegram.sendChatAction(dialog.with, 'typing');
         return ctx.copyMessage(dialog.with);
     }
