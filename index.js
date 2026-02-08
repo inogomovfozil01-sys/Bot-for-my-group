@@ -1,9 +1,35 @@
 const { Telegraf, Markup } = require('telegraf');
 const config = require('./config');
 const msgs = require('./messages');
+const { Pool } = require('pg');
 
 const bot = new Telegraf(config.TOKEN);
 
+// === DATABASE SETUP ===
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+});
+
+const initDB = async () => {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            phone TEXT,
+            username TEXT,
+            first_name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+};
+initDB().catch(console.error);
+
+const isRegistered = async (userId) => {
+    const res = await pool.query('SELECT 1 FROM users WHERE user_id = $1', [userId]);
+    return res.rowCount > 0;
+};
+
+// === UTILS ===
 const esc = (str = '') =>
     str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -14,13 +40,14 @@ let currentMaterials = "Пока не добавлено";
 let allUsers = new Map();
 let userStates = {};
 let lastGroupMessages = new Map();
-
 let dialogs = new Map();
 
+// === ROLES ===
 const isOwner = (ctx) => ctx.from?.id === config.OWNER_ID;
 const isTeacher = (ctx) =>
     ctx.from && (ctx.from.id === config.TEACHER_ID || ctx.from.id === config.OWNER_ID);
 
+// === MIDDLEWARE ===
 const checkPrivate = async (ctx, next) => {
     if (ctx.chat?.type !== 'private') return;
     if (ctx.from) {
@@ -41,13 +68,14 @@ const checkMembership = async (ctx, next) => {
     return ctx.reply(msgs.accessDenied, { parse_mode: 'HTML' });
 };
 
+// === MENU ===
 const getMenu = (ctx) => {
     if (isOwner(ctx)) {
         return Markup.keyboard([
             [msgs.buttons.student.homework, msgs.buttons.student.vocabulary, msgs.buttons.student.materials],
             [msgs.buttons.teacher.setHomework, msgs.buttons.teacher.setVocabulary, msgs.buttons.teacher.setMaterials],
             [msgs.buttons.teacher.sendNews, msgs.buttons.owner.broadcastAll],
-            [msgs.buttons.owner.adminPanel, msgs.buttons.owner.stats]
+            [msgs.buttons.owner.adminPanel, "📞 Номера учеников", msgs.buttons.owner.stats]
         ]).resize();
     }
 
@@ -65,7 +93,20 @@ const getMenu = (ctx) => {
     ]).resize();
 };
 
-bot.start(checkPrivate, checkMembership, (ctx) => {
+// === START (WITH REGISTRATION) ===
+bot.start(checkPrivate, checkMembership, async (ctx) => {
+    if (!isOwner(ctx) && !isTeacher(ctx)) {
+        const registered = await isRegistered(ctx.from.id);
+        if (!registered) {
+            return ctx.reply(
+                "Чтобы бот работал качественно, нам нужно добавить тебя в список учеников. Пожалуйста, нажми на кнопку ниже.",
+                Markup.keyboard([
+                    [Markup.button.contactRequest("Пройти регистрацию")]
+                ]).resize()
+            );
+        }
+    }
+
     const text = isOwner(ctx)
         ? msgs.ownerMenu
         : isTeacher(ctx)
@@ -75,6 +116,50 @@ bot.start(checkPrivate, checkMembership, (ctx) => {
     ctx.reply(text, { parse_mode: 'HTML', ...getMenu(ctx) });
 });
 
+// === CONTACT HANDLER ===
+bot.on('contact', async (ctx) => {
+    if (ctx.message.contact.user_id !== ctx.from.id) {
+        return ctx.reply("Пожалуйста, отправьте свой собственный контакт.");
+    }
+
+    try {
+        const { phone_number, first_name } = ctx.message.contact;
+        const username = ctx.from.username || '';
+
+        await pool.query(
+            `INSERT INTO users (user_id, phone, username, first_name) 
+             VALUES ($1, $2, $3, $4) ON CONFLICT (user_id) DO NOTHING`,
+            [ctx.from.id, phone_number, username, first_name]
+        );
+
+        await ctx.reply("Регистрация успешно завершена!", getMenu(ctx));
+    } catch (e) {
+        console.error(e);
+        ctx.reply("Ошибка регистрации.");
+    }
+});
+
+// === PHONE LIST (OWNER ONLY) ===
+bot.hears("📞 Номера учеников", async (ctx) => {
+    if (!isOwner(ctx)) return;
+
+    try {
+        const res = await pool.query('SELECT first_name, username, phone FROM users ORDER BY created_at DESC');
+        if (res.rowCount === 0) return ctx.reply("Список зарегистрированных учеников пуст.");
+
+        let report = "<b>📞 СПИСОК НОМЕРОВ:</b>\n\n";
+        res.rows.forEach((u, i) => {
+            report += `${i + 1}. ${esc(u.first_name)}${u.username ? ` (@${u.username})` : ''}: <code>${u.phone}</code>\n`;
+        });
+
+        ctx.reply(report, { parse_mode: 'HTML' });
+    } catch (e) {
+        console.error(e);
+        ctx.reply("Ошибка БД.");
+    }
+});
+
+// === STUDENT VIEW ===
 bot.hears(msgs.buttons.student.homework, checkPrivate, checkMembership, (ctx) =>
     ctx.reply(msgs.homeworkDisplay(esc(currentHomework)), { parse_mode: 'HTML' })
 );
@@ -90,6 +175,7 @@ bot.hears(msgs.buttons.student.materials, checkPrivate, checkMembership, (ctx) =
     })
 );
 
+// === TEACHER SET ===
 bot.hears(msgs.buttons.teacher.setHomework, (ctx) => {
     if (!isTeacher(ctx)) return;
     userStates[ctx.from.id] = { step: 'SET_HW' };
@@ -114,6 +200,7 @@ bot.hears(msgs.buttons.teacher.sendNews, (ctx) => {
     ctx.reply("<b>Введите сообщение для группы:</b>", { parse_mode: 'HTML' });
 });
 
+// === HELP / FEEDBACK ===
 bot.hears(msgs.buttons.student.help, checkPrivate, checkMembership, async (ctx) => {
     dialogs.set(ctx.from.id, { with: config.TEACHER_ID });
     dialogs.set(config.TEACHER_ID, { with: ctx.from.id });
@@ -143,6 +230,7 @@ bot.hears(msgs.buttons.student.feedback, checkPrivate, checkMembership, (ctx) =>
     ctx.reply("<b>Напишите сообщение директору:</b>", { parse_mode: 'HTML' });
 });
 
+// === ADMIN PANEL ===
 bot.hears(msgs.buttons.owner.adminPanel, (ctx) => {
     if (!isTeacher(ctx)) return;
 
@@ -159,6 +247,7 @@ bot.hears(msgs.buttons.owner.adminPanel, (ctx) => {
     });
 });
 
+// === CALLBACKS ===
 bot.on('callback_query', async (ctx) => {
     const data = ctx.callbackQuery.data;
 
@@ -209,7 +298,6 @@ bot.on('callback_query', async (ctx) => {
 
     const [action, targetId] = data.split('_');
     if (!['mute', 'unmute', 'ban', 'unban', 'kick', 'delmsg'].includes(action)) return;
-    
     if (!isTeacher(ctx)) return ctx.answerCbQuery('Нет доступа');
 
     try {
@@ -245,6 +333,7 @@ bot.on('callback_query', async (ctx) => {
     }
 });
 
+// === MESSAGE HANDLER ===
 bot.on('message', async (ctx) => {
     if (ctx.chat.id.toString() === config.GROUP_ID.toString()) {
         if (ctx.from) lastGroupMessages.set(ctx.from.id.toString(), ctx.message.message_id);
