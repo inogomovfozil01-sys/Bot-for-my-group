@@ -54,7 +54,7 @@ const isTeacher = (ctx) => ctx.from && (ctx.from.id === config.TEACHER_ID || ctx
 // MIDDLEWARE
 const checkPrivate = async (ctx, next) => {
     if (ctx.chat?.type !== 'private') return;
-    if (ctx.from) {
+    if (ctx.from && await isRegistered(ctx.from.id)) {
         try {
             await pool.query(
                 `UPDATE users SET first_name = $1, username = $2 WHERE user_id = $3`,
@@ -112,7 +112,7 @@ bot.start(checkPrivate, checkMembership, async (ctx) => {
     ctx.reply(text, { parse_mode: 'HTML', ...getMenu(ctx) });
 });
 
-// CONTACT
+// CONTACT REGISTRATION
 bot.on('contact', async (ctx) => {
     if (ctx.message.contact.user_id !== ctx.from.id) return ctx.reply("Это не ваш контакт.");
     try {
@@ -121,11 +121,11 @@ bot.on('contact', async (ctx) => {
              ON CONFLICT (user_id) DO UPDATE SET phone = EXCLUDED.phone`,
             [ctx.from.id, ctx.message.contact.phone_number, ctx.from.username || '', ctx.from.first_name]
         );
-        await ctx.reply("Регистрация завершена!", getMenu(ctx));
-    } catch (e) { ctx.reply("Ошибка БД."); }
+        await ctx.reply("Регистрация успешно завершена!", getMenu(ctx));
+    } catch (e) { ctx.reply("Ошибка БД при регистрации."); }
 });
 
-// TEACHer & OWNER BUTTONS
+// MODERATION TOOLS
 bot.hears(msgs.buttons.teacher.setHomework, (ctx) => { if (isTeacher(ctx)) { userStates[ctx.from.id] = { step: 'SET_HW' }; ctx.reply("Введите ДЗ:"); } });
 bot.hears(msgs.buttons.teacher.setVocabulary, (ctx) => { if (isTeacher(ctx)) { userStates[ctx.from.id] = { step: 'SET_VOCAB' }; ctx.reply("Введите слова:"); } });
 bot.hears(msgs.buttons.teacher.setMaterials, (ctx) => { if (isTeacher(ctx)) { userStates[ctx.from.id] = { step: 'SET_MAT' }; ctx.reply("Введите материалы:"); } });
@@ -135,23 +135,29 @@ bot.hears(msgs.buttons.owner.broadcastAll, (ctx) => { if (isOwner(ctx)) { userSt
 // PHONES LIST
 bot.hears(msgs.buttons.owner.phones, async (ctx) => {
     if (!isTeacher(ctx)) return;
-    const res = await pool.query('SELECT first_name, username, phone FROM users ORDER BY created_at DESC');
-    let txt = "<b>📞 СПИСОК УЧЕНИКОВ:</b>\n\n";
-    res.rows.forEach((u, i) => txt += `${i+1}. ${u.first_name} (@${u.username}) — <code>${u.phone}</code>\n`);
-    ctx.reply(txt, { parse_mode: 'HTML' });
+    try {
+        const res = await pool.query('SELECT first_name, username, phone FROM users ORDER BY created_at DESC');
+        if (res.rowCount === 0) return ctx.reply("Список зарегистрированных учеников пуст.");
+        let txt = "<b>📞 СПИСОК УЧЕНИКОВ:</b>\n\n";
+        res.rows.forEach((u, i) => txt += `${i+1}. ${esc(u.first_name)} ${u.username ? `(@${u.username})` : ''} — <code>${u.phone}</code>\n`);
+        ctx.reply(txt, { parse_mode: 'HTML' });
+    } catch (e) { ctx.reply("Ошибка при чтении списка."); }
 });
 
-// ADMIN PANEL
+// MODERATION PANEL (DB-BASED)
 bot.hears(msgs.buttons.owner.adminPanel, async (ctx) => {
     if (!isTeacher(ctx)) return;
-    const res = await pool.query('SELECT user_id, first_name FROM users');
-    const btns = res.rows
-        .filter(u => ![config.OWNER_ID, config.TEACHER_ID].includes(Number(u.user_id)))
-        .map(u => [Markup.button.callback(u.first_name, `manage_${u.user_id}`)]);
-    ctx.reply(msgs.adminSelectUser, { parse_mode: 'HTML', ...Markup.inlineKeyboard(btns) });
+    try {
+        const res = await pool.query('SELECT user_id, first_name FROM users');
+        const btns = res.rows
+            .filter(u => ![config.OWNER_ID, config.TEACHER_ID].includes(Number(u.user_id)))
+            .map(u => [Markup.button.callback(u.first_name, `manage_${u.user_id}`)]);
+        if (btns.length === 0) return ctx.reply("Нет учеников для модерации.");
+        ctx.reply(msgs.adminSelectUser, { parse_mode: 'HTML', ...Markup.inlineKeyboard(btns) });
+    } catch (e) { ctx.reply("Ошибка загрузки списка."); }
 });
 
-// STUDENT BUTTONS
+// STUDENT VIEWS
 bot.hears(msgs.buttons.student.homework, (ctx) => ctx.reply(msgs.homeworkDisplay(esc(currentHomework)), { parse_mode: 'HTML' }));
 bot.hears(msgs.buttons.student.vocabulary, (ctx) => ctx.reply(msgs.vocabDisplay(esc(currentVocabulary)), { parse_mode: 'HTML' }));
 bot.hears(msgs.buttons.student.materials, (ctx) => ctx.reply(msgs.materialsDisplay(esc(currentMaterials)), { parse_mode: 'HTML' }));
@@ -196,6 +202,7 @@ bot.on('callback_query', async (ctx) => {
         ctx.reply("Чат открыт. Пишите ответ:"); ctx.answerCbQuery(); return;
     }
     const [action, target] = data.split('_');
+    if (!isTeacher(ctx)) return ctx.answerCbQuery("Нет прав");
     try {
         if (action === 'mute') await ctx.telegram.restrictChatMember(config.GROUP_ID, target, { permissions: { can_send_messages: false } });
         if (action === 'unmute') await ctx.telegram.restrictChatMember(config.GROUP_ID, target, { permissions: { can_send_messages: true, can_send_media_messages: true, can_send_other_messages: true, can_add_web_page_previews: true } });
@@ -210,7 +217,7 @@ bot.on('callback_query', async (ctx) => {
     } catch (e) { await ctx.answerCbQuery("Ошибка: " + e.message, { show_alert: true }); }
 });
 
-// MESSAGE HANDLER
+// MESSAGES
 bot.on('message', async (ctx) => {
     if (ctx.chat.id.toString() === config.GROUP_ID.toString()) {
         if (ctx.from) lastGroupMessages.set(ctx.from.id.toString(), ctx.message.message_id);
@@ -230,8 +237,8 @@ bot.on('message', async (ctx) => {
         if (st.step === 'SET_HW') { currentHomework = ctx.message.text; delete userStates[ctx.from.id]; return ctx.reply("ДЗ сохранено", getMenu(ctx)); }
         if (st.step === 'SET_VOCAB') { currentVocabulary = ctx.message.text; delete userStates[ctx.from.id]; return ctx.reply("Слова сохранены", getMenu(ctx)); }
         if (st.step === 'SET_MAT') { currentMaterials = ctx.message.text; delete userStates[ctx.from.id]; return ctx.reply("Материалы сохранены", getMenu(ctx)); }
-        if (st.step === 'NEWS') { await bot.telegram.sendMessage(config.GROUP_ID, ctx.message.text); delete userStates[ctx.from.id]; return ctx.reply("Отправлено в группу", getMenu(ctx)); }
-        if (st.step === 'FEED') { bot.telegram.sendMessage(config.OWNER_ID, `📩 Отзыв от ${ctx.from.first_name}: ${ctx.message.text}`); delete userStates[ctx.from.id]; return ctx.reply("Сообщение отправлено директору.", getMenu(ctx)); }
+        if (st.step === 'NEWS') { await bot.telegram.sendMessage(config.GROUP_ID, ctx.message.text); delete userStates[ctx.from.id]; return ctx.reply("В группу отправлено", getMenu(ctx)); }
+        if (st.step === 'FEED') { bot.telegram.sendMessage(config.OWNER_ID, `📩 Отзыв от ${ctx.from.first_name}: ${ctx.message.text}`); delete userStates[ctx.from.id]; return ctx.reply("Сообщение отправлено.", getMenu(ctx)); }
         if (st.step === 'BROAD') {
             const all = await pool.query('SELECT user_id FROM users');
             for (let u of all.rows) { try { await bot.telegram.sendMessage(u.user_id, ctx.message.text); } catch(e){} }
