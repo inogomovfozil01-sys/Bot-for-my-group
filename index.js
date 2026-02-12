@@ -193,7 +193,13 @@ async function getUserRecord(userId) {
 
 async function upsertUserRecord(userId, payload = {}) {
     const id = toId(userId);
-    const prev = memoryUsers.get(id) || {};
+    let prev = memoryUsers.get(id) || {};
+
+    // Preserve persisted values when memory cache is cold after restart.
+    if (!memoryUsers.has(id) && dbReady) {
+        const dbUser = await getUserRecord(id);
+        if (dbUser) prev = dbUser;
+    }
 
     const next = {
         user_id: id,
@@ -249,6 +255,20 @@ async function setUserLang(userId, language, profile = {}) {
 async function hasSelectedLanguage(userId) {
     const user = await getUserRecord(userId);
     return Boolean(user?.language_selected);
+}
+
+async function runStudentOnboarding(ctx) {
+    const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    const allowed = await ensureStudentAccess(ctx);
+    if (!allowed) return;
+
+    if (!(await isRegistered(ctx.from.id))) {
+        userStates.set(toId(ctx.from.id), { step: STATES.REGISTER_NAME });
+        await ctx.reply(textByLang(lang, 'text.askName'), Markup.removeKeyboard());
+        return;
+    }
+
+    await sendMainMenu(ctx);
 }
 
 async function isRegistered(userId) {
@@ -409,8 +429,7 @@ function buildMenu(lang, ctx) {
     return Markup.keyboard([
         [buttonByLang(lang, 'student.homework'), buttonByLang(lang, 'student.vocabulary')],
         [buttonByLang(lang, 'student.materials'), buttonByLang(lang, 'student.help')],
-        [buttonByLang(lang, 'student.feedback')],
-        [buttonByLang(lang, 'common.changeLanguage')]
+        [buttonByLang(lang, 'student.feedback')]
     ]).resize();
 }
 
@@ -509,26 +528,13 @@ bot.start(async (ctx) => {
         username: ctx.from.username || ''
     });
 
-    const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
-
-    if (!dbReady && !isTeacher(ctx)) {
-        await ctx.reply(textByLang(lang, 'text.dbUnavailable'));
-    }
-
     if (!isTeacher(ctx)) {
         if (!(await hasSelectedLanguage(ctx.from.id))) {
             await sendLanguageSelector(ctx, true);
             return;
         }
-
-        const allowed = await ensureStudentAccess(ctx);
-        if (!allowed) return;
-
-        if (!(await isRegistered(ctx.from.id))) {
-            userStates.set(toId(ctx.from.id), { step: STATES.REGISTER_NAME });
-            await ctx.reply(textByLang(lang, 'text.askName'), Markup.removeKeyboard());
-            return;
-        }
+        await runStudentOnboarding(ctx);
+        return;
     }
 
     await sendMainMenu(ctx);
@@ -709,7 +715,12 @@ bot.on('callback_query', async (ctx) => {
             await ctx.reply(msg);
         }
 
-        await sendMainMenu(ctx);
+        if (isTeacher(ctx)) {
+            await sendMainMenu(ctx);
+            return;
+        }
+
+        await runStudentOnboarding(ctx);
         return;
     }
 
