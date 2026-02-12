@@ -363,10 +363,19 @@ async function getStudentByTopic(topicId) {
 async function ensureStudentTopic(from, preferredName) {
     const userId = toId(from.id);
     const existing = await getTopicByStudent(userId);
-    if (existing) return existing;
-
     const baseName = preferredName || from.first_name || 'Student';
     const safeName = String(baseName).slice(0, 120);
+
+    if (existing) {
+        try {
+            await bot.telegram.editForumTopic(CHAT_IDS.teacherChat, existing, { name: safeName });
+        } catch (e) {
+            console.error('Forum topic rename error:', e.message);
+        }
+        await saveStudentTopic(userId, existing, safeName);
+        return existing;
+    }
+
     const topic = await bot.telegram.createForumTopic(CHAT_IDS.teacherChat, safeName);
     await saveStudentTopic(userId, topic.message_thread_id, safeName);
     return topic.message_thread_id;
@@ -384,10 +393,15 @@ async function sendStudentCardToTopic(from, studentName, phone, username) {
         textByLang(teacherLang, 'text.studentCardPhone', { phone: esc(phone) })
     ].join('\n');
 
-    await bot.telegram.sendMessage(CHAT_IDS.teacherChat, card, {
-        parse_mode: 'HTML',
-        message_thread_id: topicId
-    });
+    try {
+        await bot.telegram.sendMessage(CHAT_IDS.teacherChat, card, {
+            parse_mode: 'HTML',
+            message_thread_id: topicId
+        });
+    } catch (e) {
+        console.error('Student card send error:', e.message);
+        throw e;
+    }
 }
 
 async function hasMembership(userId) {
@@ -566,7 +580,7 @@ bot.on('contact', async (ctx) => {
     }
 
     try {
-        const studentName = (state?.name || ctx.from.first_name || '').trim() || ctx.from.first_name || 'Student';
+        const studentName = String(state?.name || ctx.from.first_name || 'Student').trim();
         await upsertUserRecord(ctx.from.id, {
             phone: ctx.message.contact.phone_number,
             first_name: studentName,
@@ -848,6 +862,8 @@ bot.on('message', async (ctx) => {
         }
 
         try {
+            const studentLang = await getUserLang(studentId);
+            await bot.telegram.sendMessage(studentId, textByLang(studentLang, 'text.teacherMessagePrefix'));
             await bot.telegram.copyMessage(studentId, CHAT_IDS.teacherChat, ctx.message.message_id);
         } catch {
             // ignore delivery errors
