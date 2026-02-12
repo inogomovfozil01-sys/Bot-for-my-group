@@ -443,7 +443,8 @@ function buildMenu(lang, ctx) {
     return Markup.keyboard([
         [buttonByLang(lang, 'student.homework'), buttonByLang(lang, 'student.vocabulary')],
         [buttonByLang(lang, 'student.materials'), buttonByLang(lang, 'student.help')],
-        [buttonByLang(lang, 'student.feedback')]
+        [buttonByLang(lang, 'student.feedback')],
+        [buttonByLang(lang, 'common.changeLanguage')]
     ]).resize();
 }
 
@@ -843,6 +844,23 @@ bot.on('message', async (ctx) => {
     if (chatId === CHAT_IDS.group) {
         lastGroupMessages.set(fromId, ctx.message.message_id);
         return;
+    }
+
+    if (ctx.chat.type === 'private' && !isTeacher(ctx)) {
+        const selectedLanguage = await hasSelectedLanguage(fromId);
+        if (!selectedLanguage) {
+            await sendLanguageSelector(ctx, true);
+            return;
+        }
+
+        const registered = await isRegistered(fromId);
+        const state = userStates.get(fromId);
+        if (!registered && !state && !ctx.message.contact) {
+            const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+            userStates.set(fromId, { step: STATES.REGISTER_NAME });
+            await ctx.reply(textByLang(lang, 'text.askName'), Markup.removeKeyboard());
+            return;
+        }
     }
 
     if (chatId === CHAT_IDS.teacherChat) {
