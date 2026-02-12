@@ -103,6 +103,7 @@ const LANGUAGES = {
             studentCardPhone: 'Телефон: <code>{phone}</code>',
 
             languagePrompt: 'Выберите язык интерфейса:',
+            languagePromptStart: 'Выбери язык / Choose language:',
             languageChanged: 'Язык изменен на русский.',
 
             ownerFeedbackHeader: 'Отзыв от {name} ({id})'
@@ -212,6 +213,7 @@ const LANGUAGES = {
             studentCardPhone: 'Phone: <code>{phone}</code>',
 
             languagePrompt: 'Choose interface language:',
+            languagePromptStart: 'Выбери язык / Choose language:',
             languageChanged: 'Language switched to English.',
 
             ownerFeedbackHeader: 'Feedback from {name} ({id})'
@@ -224,4 +226,3 @@ module.exports = {
     SUPPORTED_LANGS: ['ru', 'en'],
     DEFAULT_LANG: 'ru'
 };
-
