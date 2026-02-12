@@ -119,8 +119,41 @@ async function initDB() {
                 username TEXT,
                 first_name TEXT,
                 language TEXT DEFAULT 'ru',
+                language_selected BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+        `);
+
+        // Backward-compatible schema migration for existing deployments.
+        await pool.query(`
+            ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS phone TEXT,
+                ADD COLUMN IF NOT EXISTS username TEXT,
+                ADD COLUMN IF NOT EXISTS first_name TEXT,
+                ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'ru',
+                ADD COLUMN IF NOT EXISTS language_selected BOOLEAN DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+        `);
+
+        await pool.query(`
+            ALTER TABLE users
+            ALTER COLUMN user_id TYPE TEXT USING user_id::text;
+        `);
+
+        // If old schema had phone_number instead of phone, copy values once.
+        await pool.query(`
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = 'phone_number'
+                ) THEN
+                    UPDATE users
+                    SET phone = COALESCE(phone, phone_number::text)
+                    WHERE phone IS NULL;
+                END IF;
+            END $$;
         `);
 
         await pool.query(`
@@ -130,6 +163,11 @@ async function initDB() {
                 topic_name TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+        `);
+
+        await pool.query(`
+            ALTER TABLE student_topics
+            ALTER COLUMN user_id TYPE TEXT USING user_id::text;
         `);
 
         dbReady = true;
@@ -144,7 +182,7 @@ async function getUserRecord(userId) {
     const id = toId(userId);
     if (dbReady) {
         try {
-            const res = await pool.query('SELECT user_id, phone, username, first_name, language FROM users WHERE user_id = $1', [id]);
+            const res = await pool.query('SELECT user_id, phone, username, first_name, language, language_selected FROM users WHERE user_id = $1', [id]);
             if (res.rowCount > 0) return res.rows[0];
         } catch (e) {
             console.error('DB read user error:', e.message);
@@ -162,7 +200,8 @@ async function upsertUserRecord(userId, payload = {}) {
         phone: payload.phone ?? prev.phone ?? null,
         username: payload.username ?? prev.username ?? '',
         first_name: payload.first_name ?? prev.first_name ?? '',
-        language: normalizeLang(payload.language ?? prev.language ?? msgs.DEFAULT_LANG)
+        language: normalizeLang(payload.language ?? prev.language ?? msgs.DEFAULT_LANG),
+        language_selected: payload.language_selected ?? prev.language_selected ?? false
     };
 
     memoryUsers.set(id, next);
@@ -171,15 +210,16 @@ async function upsertUserRecord(userId, payload = {}) {
 
     try {
         await pool.query(
-            `INSERT INTO users (user_id, phone, username, first_name, language)
-             VALUES ($1, $2, $3, $4, $5)
+            `INSERT INTO users (user_id, phone, username, first_name, language, language_selected)
+             VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (user_id)
              DO UPDATE SET
                 phone = COALESCE(EXCLUDED.phone, users.phone),
                 username = EXCLUDED.username,
                 first_name = EXCLUDED.first_name,
-                language = EXCLUDED.language`,
-            [next.user_id, next.phone, next.username, next.first_name, next.language]
+                language = EXCLUDED.language,
+                language_selected = EXCLUDED.language_selected`,
+            [next.user_id, next.phone, next.username, next.first_name, next.language, next.language_selected]
         );
     } catch (e) {
         console.error('DB upsert user error:', e.message);
@@ -187,6 +227,9 @@ async function upsertUserRecord(userId, payload = {}) {
 }
 
 async function getUserLang(userId, telegramLangCode) {
+    const id = toId(userId);
+    if ([ROLE_IDS.owner, ROLE_IDS.teacher].includes(id)) return 'ru';
+
     const user = await getUserRecord(userId);
     if (user?.language && msgs.SUPPORTED_LANGS.includes(user.language)) {
         return user.language;
@@ -198,8 +241,14 @@ async function setUserLang(userId, language, profile = {}) {
     const lang = normalizeLang(language);
     await upsertUserRecord(userId, {
         ...profile,
-        language: lang
+        language: lang,
+        language_selected: true
     });
+}
+
+async function hasSelectedLanguage(userId) {
+    const user = await getUserRecord(userId);
+    return Boolean(user?.language_selected);
 }
 
 async function isRegistered(userId) {
@@ -346,16 +395,14 @@ function buildMenu(lang, ctx) {
             [buttonByLang(lang, 'student.homework'), buttonByLang(lang, 'student.vocabulary'), buttonByLang(lang, 'student.materials')],
             [buttonByLang(lang, 'teacher.setHomework'), buttonByLang(lang, 'teacher.setVocabulary'), buttonByLang(lang, 'teacher.setMaterials')],
             [buttonByLang(lang, 'teacher.sendNews'), buttonByLang(lang, 'owner.broadcastAll')],
-            [buttonByLang(lang, 'owner.adminPanel'), buttonByLang(lang, 'owner.phones'), buttonByLang(lang, 'owner.stats')],
-            [buttonByLang(lang, 'common.changeLanguage')]
+            [buttonByLang(lang, 'owner.adminPanel'), buttonByLang(lang, 'owner.phones'), buttonByLang(lang, 'owner.stats')]
         ]).resize();
     }
 
     if (isTeacher(ctx)) {
         return Markup.keyboard([
             [buttonByLang(lang, 'teacher.setHomework'), buttonByLang(lang, 'teacher.setVocabulary'), buttonByLang(lang, 'teacher.setMaterials')],
-            [buttonByLang(lang, 'teacher.sendNews'), buttonByLang(lang, 'owner.adminPanel'), buttonByLang(lang, 'owner.phones')],
-            [buttonByLang(lang, 'common.changeLanguage')]
+            [buttonByLang(lang, 'teacher.sendNews'), buttonByLang(lang, 'owner.adminPanel'), buttonByLang(lang, 'owner.phones')]
         ]).resize();
     }
 
@@ -378,9 +425,10 @@ async function sendMainMenu(ctx) {
     await ctx.reply(title, { parse_mode: 'HTML', ...buildMenu(lang, ctx) });
 }
 
-async function sendLanguageSelector(ctx) {
+async function sendLanguageSelector(ctx, forceStartPrompt = false) {
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
-    await ctx.reply(textByLang(lang, 'text.languagePrompt'), {
+    const prompt = forceStartPrompt ? textByLang('ru', 'text.languagePromptStart') : textByLang(lang, 'text.languagePrompt');
+    await ctx.reply(prompt, {
         ...Markup.inlineKeyboard([
             [Markup.button.callback(buttonByLang('ru', 'language.russian'), 'lang_ru')],
             [Markup.button.callback(buttonByLang('en', 'language.english'), 'lang_en')]
@@ -458,8 +506,7 @@ bot.start(async (ctx) => {
 
     await upsertUserRecord(ctx.from.id, {
         first_name: ctx.from.first_name,
-        username: ctx.from.username || '',
-        language: getDefaultLangFromTelegram(ctx.from.language_code)
+        username: ctx.from.username || ''
     });
 
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
@@ -469,6 +516,11 @@ bot.start(async (ctx) => {
     }
 
     if (!isTeacher(ctx)) {
+        if (!(await hasSelectedLanguage(ctx.from.id))) {
+            await sendLanguageSelector(ctx, true);
+            return;
+        }
+
         const allowed = await ensureStudentAccess(ctx);
         if (!allowed) return;
 
@@ -482,7 +534,13 @@ bot.start(async (ctx) => {
     await sendMainMenu(ctx);
 });
 
-bot.command('lang', sendLanguageSelector);
+bot.command('lang', async (ctx) => {
+    if (isTeacher(ctx)) {
+        await ctx.reply('Для учителя и владельца язык зафиксирован: русский.');
+        return;
+    }
+    await sendLanguageSelector(ctx);
+});
 
 bot.on('contact', async (ctx) => {
     if (ctx.chat?.type !== 'private') return;
@@ -621,13 +679,21 @@ registerLocalizedHears('owner.stats', async (ctx) => {
     );
 });
 
-registerLocalizedHears('common.changeLanguage', sendLanguageSelector);
+registerLocalizedHears('common.changeLanguage', async (ctx) => {
+    if (isTeacher(ctx)) return;
+    await sendLanguageSelector(ctx);
+});
 
 bot.on('callback_query', async (ctx) => {
     const data = ctx.callbackQuery?.data || '';
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
 
     if (data === 'lang_ru' || data === 'lang_en') {
+        if (isTeacher(ctx)) {
+            await ctx.answerCbQuery('Язык для этой роли фиксирован: русский.');
+            return;
+        }
+
         const selected = data.replace('lang_', '');
         await setUserLang(ctx.from.id, selected, {
             first_name: ctx.from.first_name,
@@ -746,8 +812,7 @@ bot.on('message', async (ctx) => {
 
     await upsertUserRecord(fromId, {
         first_name: ctx.from?.first_name || '',
-        username: ctx.from?.username || '',
-        language: getDefaultLangFromTelegram(ctx.from?.language_code)
+        username: ctx.from?.username || ''
     });
 
     if (chatId === CHAT_IDS.group) {
