@@ -105,6 +105,23 @@ function buttonByLang(lang, path) {
     return textByLang(lang, `buttons.${path}`);
 }
 
+function getDbConnectionMeta() {
+    if (!config.DATABASE_URL) {
+        return { configured: false, host: '-', database: '-' };
+    }
+
+    try {
+        const parsed = new URL(config.DATABASE_URL);
+        return {
+            configured: true,
+            host: parsed.hostname || '-',
+            database: (parsed.pathname || '').replace(/^\//, '') || '-'
+        };
+    } catch {
+        return { configured: true, host: 'invalid_url', database: '-' };
+    }
+}
+
 async function initDB() {
     if (!pool) {
         console.warn('DATABASE_URL is not configured. Using in-memory fallback.');
@@ -157,7 +174,7 @@ async function initDB() {
         `);
 
         await pool.query(`
-            CREATE TABLE IF NOT EXISTS student_topics (
+            CREATE TABLE IF NOT EXISTS students_topic (
                 user_id TEXT PRIMARY KEY,
                 topic_id BIGINT NOT NULL,
                 topic_name TEXT,
@@ -166,12 +183,33 @@ async function initDB() {
         `);
 
         await pool.query(`
-            ALTER TABLE student_topics
+            ALTER TABLE students_topic
             ALTER COLUMN user_id TYPE TEXT USING user_id::text;
         `);
 
+        // Migrate old table name if it exists.
+        await pool.query(`
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_name = 'student_topics'
+                ) THEN
+                    INSERT INTO students_topic (user_id, topic_id, topic_name, created_at)
+                    SELECT user_id::text, topic_id, topic_name, created_at
+                    FROM student_topics
+                    ON CONFLICT (user_id)
+                    DO UPDATE SET
+                        topic_id = EXCLUDED.topic_id,
+                        topic_name = EXCLUDED.topic_name;
+                END IF;
+            END $$;
+        `);
+
         dbReady = true;
-        console.log('Database synchronized');
+        const meta = getDbConnectionMeta();
+        console.log(`Database synchronized (host=${meta.host}, db=${meta.database})`);
     } catch (e) {
         dbReady = false;
         console.error('DB Init Error:', e.message);
@@ -307,7 +345,7 @@ async function saveStudentTopic(userId, topicId, topicName) {
 
     try {
         await pool.query(
-            `INSERT INTO student_topics (user_id, topic_id, topic_name)
+            `INSERT INTO students_topic (user_id, topic_id, topic_name)
              VALUES ($1, $2, $3)
              ON CONFLICT (user_id)
              DO UPDATE SET topic_id = EXCLUDED.topic_id, topic_name = EXCLUDED.topic_name`,
@@ -324,7 +362,7 @@ async function getTopicByStudent(userId) {
 
     if (dbReady) {
         try {
-            const res = await pool.query('SELECT topic_id FROM student_topics WHERE user_id = $1', [id]);
+            const res = await pool.query('SELECT topic_id FROM students_topic WHERE user_id = $1', [id]);
             if (res.rowCount > 0) {
                 const topicId = Number(res.rows[0].topic_id);
                 studentTopicCache.set(id, topicId);
@@ -345,7 +383,7 @@ async function getStudentByTopic(topicId) {
 
     if (dbReady) {
         try {
-            const res = await pool.query('SELECT user_id FROM student_topics WHERE topic_id = $1', [thread]);
+            const res = await pool.query('SELECT user_id FROM students_topic WHERE topic_id = $1', [thread]);
             if (res.rowCount > 0) {
                 const studentId = toId(res.rows[0].user_id);
                 topicStudentCache.set(thread, studentId);
@@ -402,6 +440,27 @@ async function sendStudentCardToTopic(from, studentName, phone, username) {
         console.error('Student card send error:', e.message);
         throw e;
     }
+}
+
+async function syncStudentTopics() {
+    const students = await getStudentsForModeration();
+    let created = 0;
+    let updated = 0;
+
+    for (const student of students) {
+        const userId = toId(student.user_id);
+        const hadTopic = await getTopicByStudent(userId);
+
+        await ensureStudentTopic(
+            { id: userId, first_name: student.first_name || 'Student' },
+            student.first_name || 'Student'
+        );
+
+        if (hadTopic) updated += 1;
+        else created += 1;
+    }
+
+    return { total: students.length, created, updated };
 }
 
 async function hasMembership(userId) {
@@ -561,6 +620,44 @@ bot.command('lang', async (ctx) => {
         return;
     }
     await sendLanguageSelector(ctx);
+});
+
+bot.command('dbstatus', async (ctx) => {
+    if (!isOwner(ctx)) return;
+
+    const meta = getDbConnectionMeta();
+    const lines = [
+        `<b>DB status</b>`,
+        `configured: <code>${meta.configured ? 'yes' : 'no'}</code>`,
+        `ready: <code>${dbReady ? 'yes' : 'no'}</code>`,
+        `host: <code>${esc(meta.host)}</code>`,
+        `database: <code>${esc(meta.database)}</code>`
+    ];
+
+    if (dbReady) {
+        try {
+            const usersCountRes = await pool.query('SELECT COUNT(*)::int AS cnt FROM users');
+            const topicsCountRes = await pool.query('SELECT COUNT(*)::int AS cnt FROM students_topic');
+            lines.push(`users: <code>${usersCountRes.rows[0].cnt}</code>`);
+            lines.push(`students_topic: <code>${topicsCountRes.rows[0].cnt}</code>`);
+        } catch (e) {
+            lines.push(`count_error: <code>${esc(e.message)}</code>`);
+        }
+    }
+
+    await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
+});
+
+bot.command('sync_topics', async (ctx) => {
+    if (!isOwner(ctx)) return;
+    try {
+        const result = await syncStudentTopics();
+        await ctx.reply(
+            `Синхронизация завершена.\nВсего учеников: ${result.total}\nСоздано тем: ${result.created}\nОбновлено тем: ${result.updated}`
+        );
+    } catch (e) {
+        await ctx.reply(`Ошибка синхронизации: ${e.message}`);
+    }
 });
 
 bot.on('contact', async (ctx) => {
