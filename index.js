@@ -863,8 +863,19 @@ bot.on('message', async (ctx) => {
 
         try {
             const studentLang = await getUserLang(studentId);
-            await bot.telegram.sendMessage(studentId, textByLang(studentLang, 'text.teacherMessagePrefix'));
-            await bot.telegram.copyMessage(studentId, CHAT_IDS.teacherChat, ctx.message.message_id);
+            const prefix = textByLang(studentLang, 'text.teacherMessagePrefix');
+
+            if (ctx.message.text) {
+                await bot.telegram.sendMessage(studentId, `${prefix}\n\n${ctx.message.text}`);
+            } else if (ctx.message.caption) {
+                await bot.telegram.copyMessage(studentId, CHAT_IDS.teacherChat, ctx.message.message_id, {
+                    caption: `${prefix}\n\n${ctx.message.caption}`
+                });
+            } else {
+                await bot.telegram.copyMessage(studentId, CHAT_IDS.teacherChat, ctx.message.message_id, {
+                    caption: prefix
+                });
+            }
         } catch {
             // ignore delivery errors
         }
