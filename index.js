@@ -29,7 +29,13 @@ const STATES = {
     SET_MATERIALS: 'SET_MATERIALS',
     NEWS: 'NEWS',
     BROADCAST: 'BROADCAST',
-    FEEDBACK: 'FEEDBACK'
+    FEEDBACK: 'FEEDBACK',
+    RESULTS_TEACHER_MENU: 'RESULTS_TEACHER_MENU',
+    RESULTS_STUDENT_MENU: 'RESULTS_STUDENT_MENU',
+    RESULT_CREATE_NAME: 'RESULT_CREATE_NAME',
+    RESULT_CREATE_GRAMMAR: 'RESULT_CREATE_GRAMMAR',
+    RESULT_CREATE_WORDLIST: 'RESULT_CREATE_WORDLIST',
+    RESULT_CREATE_CONFIRM: 'RESULT_CREATE_CONFIRM'
 };
 
 const HTML_ESCAPE = {
@@ -50,6 +56,7 @@ const contentStore = {
     [CONTENT_KEYS.vocabulary]: null,
     [CONTENT_KEYS.materials]: null
 };
+const resultStore = new Map();
 
 let pool = null;
 let dbReady = false;
@@ -103,6 +110,116 @@ function textByLang(lang, path, vars) {
 
 function buttonByLang(lang, path) {
     return textByLang(lang, `buttons.${path}`);
+}
+
+function normalizePercent(value) {
+    const num = Number(String(value || '').trim().replace(',', '.'));
+    if (!Number.isFinite(num) || num < 0 || num > 100) return null;
+    return Math.round(num * 100) / 100;
+}
+
+function normalizeResultKey(name) {
+    return String(name || '').trim().toLowerCase();
+}
+
+function getSortedResults() {
+    return Array.from(resultStore.values()).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+}
+
+function formatResultMessage(lang, result) {
+    return [
+        textByLang(lang, 'text.resultViewTitle', { name: esc(result.name) }),
+        textByLang(lang, 'text.resultViewGrammar', { grammar: esc(result.grammar_percent) }),
+        textByLang(lang, 'text.resultViewWordList', { wordlist: esc(result.wordlist_percent) })
+    ].join('\n');
+}
+
+async function setUserState(userId, state = null) {
+    const id = toId(userId);
+
+    if (!state) {
+        userStates.delete(id);
+        if (!dbReady) return;
+        try {
+            await pool.query('DELETE FROM user_states WHERE user_id = $1', [id]);
+        } catch (e) {
+            console.error('DB delete user state error:', e.message);
+        }
+        return;
+    }
+
+    userStates.set(id, state);
+    if (!dbReady) return;
+
+    try {
+        await pool.query(
+            `INSERT INTO user_states (user_id, step, state_data)
+             VALUES ($1, $2, $3::jsonb)
+             ON CONFLICT (user_id)
+             DO UPDATE SET
+                step = EXCLUDED.step,
+                state_data = EXCLUDED.state_data,
+                updated_at = CURRENT_TIMESTAMP`,
+            [id, state.step || null, JSON.stringify(state)]
+        );
+    } catch (e) {
+        console.error('DB upsert user state error:', e.message);
+    }
+}
+
+async function getUserState(userId) {
+    const id = toId(userId);
+    if (userStates.has(id)) return userStates.get(id);
+    if (!dbReady) return null;
+
+    try {
+        const res = await pool.query('SELECT step, state_data FROM user_states WHERE user_id = $1', [id]);
+        if (res.rowCount === 0) return null;
+
+        const row = res.rows[0];
+        const state = row.state_data && typeof row.state_data === 'object'
+            ? row.state_data
+            : (row.step ? { step: row.step } : null);
+
+        if (state) userStates.set(id, state);
+        return state;
+    } catch (e) {
+        console.error('DB read user state error:', e.message);
+        return null;
+    }
+}
+
+async function upsertResult(result) {
+    const key = normalizeResultKey(result.name);
+    const row = {
+        key,
+        name: String(result.name).trim(),
+        grammar_percent: result.grammar_percent,
+        wordlist_percent: result.wordlist_percent,
+        updated_by: toId(result.updated_by)
+    };
+
+    resultStore.set(key, row);
+    if (!dbReady) return row;
+
+    try {
+        await pool.query(
+            `INSERT INTO student_results (result_key, student_name, grammar_percent, wordlist_percent, updated_by)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (result_key)
+             DO UPDATE SET
+                student_name = EXCLUDED.student_name,
+                grammar_percent = EXCLUDED.grammar_percent,
+                wordlist_percent = EXCLUDED.wordlist_percent,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = CURRENT_TIMESTAMP`,
+            [row.key, row.name, row.grammar_percent, row.wordlist_percent, row.updated_by]
+        );
+    } catch (e) {
+        console.error('DB upsert result error:', e.message);
+    }
+
+    return row;
 }
 
 function getDbConnectionMeta() {
@@ -207,6 +324,61 @@ async function initDB() {
             END $$;
         `);
 
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS user_states (
+                user_id TEXT PRIMARY KEY,
+                step TEXT,
+                state_data JSONB,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bot_content (
+                content_key TEXT PRIMARY KEY,
+                source_chat_id TEXT NOT NULL,
+                source_message_id BIGINT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS student_results (
+                result_key TEXT PRIMARY KEY,
+                student_name TEXT NOT NULL,
+                grammar_percent NUMERIC(5,2) NOT NULL,
+                wordlist_percent NUMERIC(5,2) NOT NULL,
+                updated_by TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        const contentRes = await pool.query(`
+            SELECT content_key, source_chat_id, source_message_id
+            FROM bot_content
+        `);
+        for (const row of contentRes.rows) {
+            if (!Object.prototype.hasOwnProperty.call(contentStore, row.content_key)) continue;
+            contentStore[row.content_key] = {
+                chatId: row.source_chat_id,
+                messageId: Number(row.source_message_id)
+            };
+        }
+
+        const resultRes = await pool.query(`
+            SELECT result_key, student_name, grammar_percent, wordlist_percent, updated_by
+            FROM student_results
+        `);
+        for (const row of resultRes.rows) {
+            resultStore.set(row.result_key, {
+                key: row.result_key,
+                name: row.student_name,
+                grammar_percent: Number(row.grammar_percent),
+                wordlist_percent: Number(row.wordlist_percent),
+                updated_by: row.updated_by
+            });
+        }
+
         dbReady = true;
         const meta = getDbConnectionMeta();
         console.log(`Database synchronized (host=${meta.host}, db=${meta.database})`);
@@ -301,7 +473,7 @@ async function runStudentOnboarding(ctx) {
     if (!allowed) return;
 
     if (!(await isRegistered(ctx.from.id))) {
-        userStates.set(toId(ctx.from.id), { step: STATES.REGISTER_NAME });
+        await setUserState(ctx.from.id, { step: STATES.REGISTER_NAME });
         await ctx.reply(textByLang(lang, 'text.askName'), Markup.removeKeyboard());
         return;
     }
@@ -486,7 +658,9 @@ function buildMenu(lang, ctx) {
     if (isOwner(ctx)) {
         return Markup.keyboard([
             [buttonByLang(lang, 'student.homework'), buttonByLang(lang, 'student.vocabulary'), buttonByLang(lang, 'student.materials')],
-            [buttonByLang(lang, 'teacher.setHomework'), buttonByLang(lang, 'teacher.setVocabulary'), buttonByLang(lang, 'teacher.setMaterials')],
+            [buttonByLang(lang, 'student.results'), buttonByLang(lang, 'student.gift')],
+            [buttonByLang(lang, 'teacher.setHomework'), buttonByLang(lang, 'teacher.resultsPanel')],
+            [buttonByLang(lang, 'teacher.setVocabulary'), buttonByLang(lang, 'teacher.setMaterials')],
             [buttonByLang(lang, 'teacher.sendNews'), buttonByLang(lang, 'owner.broadcastAll')],
             [buttonByLang(lang, 'owner.adminPanel'), buttonByLang(lang, 'owner.phones'), buttonByLang(lang, 'owner.stats')]
         ]).resize();
@@ -494,7 +668,8 @@ function buildMenu(lang, ctx) {
 
     if (isTeacher(ctx)) {
         return Markup.keyboard([
-            [buttonByLang(lang, 'teacher.setHomework'), buttonByLang(lang, 'teacher.setVocabulary'), buttonByLang(lang, 'teacher.setMaterials')],
+            [buttonByLang(lang, 'teacher.setHomework'), buttonByLang(lang, 'teacher.resultsPanel')],
+            [buttonByLang(lang, 'teacher.setVocabulary'), buttonByLang(lang, 'teacher.setMaterials')],
             [buttonByLang(lang, 'teacher.sendNews'), buttonByLang(lang, 'owner.adminPanel'), buttonByLang(lang, 'owner.phones')]
         ]).resize();
     }
@@ -502,6 +677,7 @@ function buildMenu(lang, ctx) {
     return Markup.keyboard([
         [buttonByLang(lang, 'student.homework'), buttonByLang(lang, 'student.vocabulary')],
         [buttonByLang(lang, 'student.materials'), buttonByLang(lang, 'student.help')],
+        [buttonByLang(lang, 'student.results'), buttonByLang(lang, 'student.gift')],
         [buttonByLang(lang, 'student.feedback')],
         [buttonByLang(lang, 'common.changeLanguage')]
     ]).resize();
@@ -518,6 +694,63 @@ async function sendMainMenu(ctx) {
     await ctx.reply(title, { parse_mode: 'HTML', ...buildMenu(lang, ctx) });
 }
 
+function resultListKeyboard(lang, results, includeCreate = false) {
+    const rows = [];
+    if (includeCreate) {
+        rows.push([buttonByLang(lang, 'teacher.createResult')]);
+    }
+    for (const item of results) {
+        rows.push([item.name]);
+    }
+    rows.push([buttonByLang(lang, 'common.back')]);
+    return Markup.keyboard(rows).resize();
+}
+
+async function showTeacherResultsMenu(ctx) {
+    const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    const results = getSortedResults();
+    await setUserState(ctx.from.id, { step: STATES.RESULTS_TEACHER_MENU });
+    await ctx.reply(textByLang(lang, 'text.resultsMenuTeacher'), {
+        parse_mode: 'HTML',
+        ...resultListKeyboard(lang, results, true)
+    });
+}
+
+async function showStudentResultsMenu(ctx) {
+    if (!(await ensureStudentAccess(ctx))) return;
+    const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    const results = getSortedResults();
+    if (!results.length) {
+        await ctx.reply(textByLang(lang, 'text.noResults'));
+        return;
+    }
+
+    await setUserState(ctx.from.id, { step: STATES.RESULTS_STUDENT_MENU });
+    await ctx.reply(textByLang(lang, 'text.resultsMenuStudent'), {
+        parse_mode: 'HTML',
+        ...resultListKeyboard(lang, results, false)
+    });
+}
+
+async function persistContent(contentKey, chatId, messageId) {
+    contentStore[contentKey] = { chatId, messageId };
+    if (!dbReady) return;
+    try {
+        await pool.query(
+            `INSERT INTO bot_content (content_key, source_chat_id, source_message_id)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (content_key)
+             DO UPDATE SET
+                source_chat_id = EXCLUDED.source_chat_id,
+                source_message_id = EXCLUDED.source_message_id,
+                updated_at = CURRENT_TIMESTAMP`,
+            [contentKey, String(chatId), Number(messageId)]
+        );
+    } catch (e) {
+        console.error('DB persist content error:', e.message);
+    }
+}
+
 async function sendLanguageSelector(ctx, forceStartPrompt = false) {
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
     const prompt = forceStartPrompt ? textByLang('ru', 'text.languagePromptStart') : textByLang(lang, 'text.languagePrompt');
@@ -531,6 +764,10 @@ async function sendLanguageSelector(ctx, forceStartPrompt = false) {
 
 function isFinishText(text) {
     return msgs.SUPPORTED_LANGS.some((lang) => text === buttonByLang(lang, 'common.finish'));
+}
+
+function isBackText(text) {
+    return msgs.SUPPORTED_LANGS.some((lang) => text === buttonByLang(lang, 'common.back'));
 }
 
 function registerLocalizedHears(path, handler) {
@@ -663,7 +900,7 @@ bot.command('sync_topics', async (ctx) => {
 bot.on('contact', async (ctx) => {
     if (ctx.chat?.type !== 'private') return;
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
-    const state = userStates.get(toId(ctx.from.id));
+    const state = await getUserState(ctx.from.id);
     const registered = await isRegistered(ctx.from.id);
 
     if (toId(ctx.message.contact.user_id) !== toId(ctx.from.id)) {
@@ -672,7 +909,7 @@ bot.on('contact', async (ctx) => {
     }
 
     if (!registered && state?.step !== STATES.REGISTER_PHONE) {
-        userStates.set(toId(ctx.from.id), { step: STATES.REGISTER_NAME });
+        await setUserState(ctx.from.id, { step: STATES.REGISTER_NAME });
         await ctx.reply(textByLang(lang, 'text.askName'), Markup.removeKeyboard());
         return;
     }
@@ -687,7 +924,7 @@ bot.on('contact', async (ctx) => {
         });
 
         await sendStudentCardToTopic(ctx.from, studentName, ctx.message.contact.phone_number, ctx.from.username || '');
-        userStates.delete(toId(ctx.from.id));
+        await setUserState(ctx.from.id, null);
         await ctx.reply(textByLang(lang, 'text.registrationSuccess'), buildMenu(lang, ctx));
         await ctx.reply(textByLang(lang, 'text.registrationTopicCardSent'));
     } catch {
@@ -698,6 +935,26 @@ bot.on('contact', async (ctx) => {
 registerLocalizedHears('student.homework', (ctx) => showContent(ctx, CONTENT_KEYS.homework, 'text.homeworkTitle'));
 registerLocalizedHears('student.vocabulary', (ctx) => showContent(ctx, CONTENT_KEYS.vocabulary, 'text.vocabularyTitle'));
 registerLocalizedHears('student.materials', (ctx) => showContent(ctx, CONTENT_KEYS.materials, 'text.materialsTitle'));
+registerLocalizedHears('student.results', (ctx) => showStudentResultsMenu(ctx));
+
+registerLocalizedHears('student.gift', async (ctx) => {
+    if (!(await ensureStudentAccess(ctx))) return;
+    const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+
+    try {
+        await ctx.replyWithInvoice({
+            title: textByLang(lang, 'text.giftTitle'),
+            description: textByLang(lang, 'text.giftDescription'),
+            payload: `gift_30_${Date.now()}`,
+            currency: 'XTR',
+            prices: [{ label: textByLang(lang, 'text.giftLabel'), amount: 30 }]
+        });
+        await ctx.reply(textByLang(lang, 'text.giftSent'));
+    } catch (e) {
+        console.error('Gift invoice error:', e.message);
+        await ctx.reply(textByLang(lang, 'text.giftFail'));
+    }
+});
 
 registerLocalizedHears('student.help', async (ctx) => {
     if (!(await ensureStudentAccess(ctx))) return;
@@ -719,42 +976,47 @@ registerLocalizedHears('student.help', async (ctx) => {
 
 registerLocalizedHears('student.feedback', async (ctx) => {
     if (!(await ensureStudentAccess(ctx))) return;
-    userStates.set(toId(ctx.from.id), { step: STATES.FEEDBACK });
+    await setUserState(ctx.from.id, { step: STATES.FEEDBACK });
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
     await ctx.reply(textByLang(lang, 'text.feedbackPrompt'));
 });
 
 registerLocalizedHears('teacher.setHomework', async (ctx) => {
     if (!isTeacher(ctx)) return;
-    userStates.set(toId(ctx.from.id), { step: STATES.SET_HOMEWORK });
+    await setUserState(ctx.from.id, { step: STATES.SET_HOMEWORK });
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
     await ctx.reply(textByLang(lang, 'text.setHomeworkPrompt'));
 });
 
 registerLocalizedHears('teacher.setVocabulary', async (ctx) => {
     if (!isTeacher(ctx)) return;
-    userStates.set(toId(ctx.from.id), { step: STATES.SET_VOCABULARY });
+    await setUserState(ctx.from.id, { step: STATES.SET_VOCABULARY });
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
     await ctx.reply(textByLang(lang, 'text.setVocabularyPrompt'));
 });
 
 registerLocalizedHears('teacher.setMaterials', async (ctx) => {
     if (!isTeacher(ctx)) return;
-    userStates.set(toId(ctx.from.id), { step: STATES.SET_MATERIALS });
+    await setUserState(ctx.from.id, { step: STATES.SET_MATERIALS });
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
     await ctx.reply(textByLang(lang, 'text.setMaterialsPrompt'));
 });
 
 registerLocalizedHears('teacher.sendNews', async (ctx) => {
     if (!isTeacher(ctx)) return;
-    userStates.set(toId(ctx.from.id), { step: STATES.NEWS });
+    await setUserState(ctx.from.id, { step: STATES.NEWS });
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
     await ctx.reply(textByLang(lang, 'text.sendNewsPrompt'));
 });
 
+registerLocalizedHears('teacher.resultsPanel', async (ctx) => {
+    if (!isTeacher(ctx)) return;
+    await showTeacherResultsMenu(ctx);
+});
+
 registerLocalizedHears('owner.broadcastAll', async (ctx) => {
     if (!isOwner(ctx)) return;
-    userStates.set(toId(ctx.from.id), { step: STATES.BROADCAST });
+    await setUserState(ctx.from.id, { step: STATES.BROADCAST });
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
     await ctx.reply(textByLang(lang, 'text.broadcastPrompt'));
 });
@@ -802,6 +1064,14 @@ registerLocalizedHears('common.changeLanguage', async (ctx) => {
     await sendLanguageSelector(ctx);
 });
 
+bot.on('pre_checkout_query', async (ctx) => {
+    try {
+        await ctx.answerPreCheckoutQuery(true);
+    } catch (e) {
+        console.error('Pre-checkout error:', e.message);
+    }
+});
+
 bot.on('callback_query', async (ctx) => {
     const data = ctx.callbackQuery?.data || '';
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
@@ -833,6 +1103,42 @@ bot.on('callback_query', async (ctx) => {
         }
 
         await runStudentOnboarding(ctx);
+        return;
+    }
+
+    if (data === 'result_confirm') {
+        if (!isTeacher(ctx)) {
+            await ctx.answerCbQuery(textByLang(lang, 'text.noRights'));
+            return;
+        }
+
+        const state = await getUserState(ctx.from.id);
+        if (!state || state.step !== STATES.RESULT_CREATE_CONFIRM) {
+            await ctx.answerCbQuery();
+            return;
+        }
+
+        await upsertResult({
+            name: state.name,
+            grammar_percent: state.grammar_percent,
+            wordlist_percent: state.wordlist_percent,
+            updated_by: ctx.from.id
+        });
+
+        await setUserState(ctx.from.id, null);
+        await ctx.answerCbQuery(textByLang(lang, 'text.resultSaved'));
+        await showTeacherResultsMenu(ctx);
+        return;
+    }
+
+    if (data === 'result_cancel') {
+        if (!isTeacher(ctx)) {
+            await ctx.answerCbQuery(textByLang(lang, 'text.noRights'));
+            return;
+        }
+        await setUserState(ctx.from.id, null);
+        await ctx.answerCbQuery(textByLang(lang, 'text.resultCanceled'));
+        await showTeacherResultsMenu(ctx);
         return;
     }
 
@@ -951,10 +1257,10 @@ bot.on('message', async (ctx) => {
         }
 
         const registered = await isRegistered(fromId);
-        const state = userStates.get(fromId);
+        const state = await getUserState(fromId);
         if (!registered && !state && !ctx.message.contact) {
             const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
-            userStates.set(fromId, { step: STATES.REGISTER_NAME });
+            await setUserState(fromId, { step: STATES.REGISTER_NAME });
             await ctx.reply(textByLang(lang, 'text.askName'), Markup.removeKeyboard());
             return;
         }
@@ -997,19 +1303,26 @@ bot.on('message', async (ctx) => {
         return;
     }
 
+    if (ctx.message.successful_payment?.currency === 'XTR') {
+        const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+        await ctx.reply(textByLang(lang, 'text.giftPaid'));
+        return;
+    }
+
     if (ctx.message.contact) return;
 
-    const state = userStates.get(fromId);
+    const state = await getUserState(fromId);
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    const text = String(ctx.message.text || '').trim();
 
     if (state?.step === STATES.REGISTER_NAME && ctx.chat.type === 'private' && !isTeacher(ctx)) {
-        const studentName = String(ctx.message.text || '').trim();
+        const studentName = text;
         if (studentName.length < 2) {
             await ctx.reply(textByLang(lang, 'text.askNameInvalid'));
             return;
         }
 
-        userStates.set(fromId, { step: STATES.REGISTER_PHONE, name: studentName });
+        await setUserState(fromId, { step: STATES.REGISTER_PHONE, name: studentName });
         await ctx.reply(
             textByLang(lang, 'text.askContact'),
             Markup.keyboard([[Markup.button.contactRequest(textByLang(lang, 'text.registrationButton'))]]).resize()
@@ -1022,6 +1335,141 @@ bot.on('message', async (ctx) => {
             textByLang(lang, 'text.askContact'),
             Markup.keyboard([[Markup.button.contactRequest(textByLang(lang, 'text.registrationButton'))]]).resize()
         );
+        return;
+    }
+
+    if (state?.step === STATES.RESULTS_STUDENT_MENU && ctx.chat.type === 'private' && !isTeacher(ctx)) {
+        if (isBackText(text)) {
+            await setUserState(fromId, null);
+            await sendMainMenu(ctx);
+            return;
+        }
+
+        const result = getSortedResults().find((item) => item.name === text);
+        if (!result) {
+            await ctx.reply(textByLang(lang, 'text.noResults'));
+            return;
+        }
+
+        await ctx.reply(formatResultMessage(lang, result), {
+            parse_mode: 'HTML',
+            ...Markup.keyboard([[buttonByLang(lang, 'common.back')]]).resize()
+        });
+        return;
+    }
+
+    if (state?.step === STATES.RESULTS_TEACHER_MENU && ctx.chat.type === 'private' && isTeacher(ctx)) {
+        if (isBackText(text)) {
+            await setUserState(fromId, null);
+            await sendMainMenu(ctx);
+            return;
+        }
+
+        if (text === buttonByLang(lang, 'teacher.createResult')) {
+            await setUserState(fromId, { step: STATES.RESULT_CREATE_NAME });
+            await ctx.reply(textByLang(lang, 'text.resultAskName'), Markup.removeKeyboard());
+            return;
+        }
+
+        const result = getSortedResults().find((item) => item.name === text);
+        if (result) {
+            await ctx.reply(formatResultMessage(lang, result), {
+                parse_mode: 'HTML',
+                ...Markup.keyboard([[buttonByLang(lang, 'common.back')]]).resize()
+            });
+            return;
+        }
+
+        await showTeacherResultsMenu(ctx);
+        return;
+    }
+
+    if (state?.step === STATES.RESULT_CREATE_NAME && ctx.chat.type === 'private' && isTeacher(ctx)) {
+        if (isBackText(text)) {
+            await showTeacherResultsMenu(ctx);
+            return;
+        }
+
+        if (text.length < 2) {
+            await ctx.reply(textByLang(lang, 'text.resultAskName'));
+            return;
+        }
+
+        await setUserState(fromId, { step: STATES.RESULT_CREATE_GRAMMAR, name: text });
+        await ctx.reply(textByLang(lang, 'text.resultAskGrammar'));
+        return;
+    }
+
+    if (state?.step === STATES.RESULT_CREATE_GRAMMAR && ctx.chat.type === 'private' && isTeacher(ctx)) {
+        if (isBackText(text)) {
+            await showTeacherResultsMenu(ctx);
+            return;
+        }
+
+        const grammar = normalizePercent(text);
+        if (grammar === null) {
+            await ctx.reply(textByLang(lang, 'text.resultInvalidPercent'));
+            return;
+        }
+
+        await setUserState(fromId, {
+            step: STATES.RESULT_CREATE_WORDLIST,
+            name: state.name,
+            grammar_percent: grammar
+        });
+        await ctx.reply(textByLang(lang, 'text.resultAskWordList'));
+        return;
+    }
+
+    if (state?.step === STATES.RESULT_CREATE_WORDLIST && ctx.chat.type === 'private' && isTeacher(ctx)) {
+        if (isBackText(text)) {
+            await showTeacherResultsMenu(ctx);
+            return;
+        }
+
+        const wordlist = normalizePercent(text);
+        if (wordlist === null) {
+            await ctx.reply(textByLang(lang, 'text.resultInvalidPercent'));
+            return;
+        }
+
+        await setUserState(fromId, {
+            step: STATES.RESULT_CREATE_CONFIRM,
+            name: state.name,
+            grammar_percent: state.grammar_percent,
+            wordlist_percent: wordlist
+        });
+
+        await ctx.reply(textByLang(lang, 'text.resultConfirmText', {
+            name: esc(state.name),
+            grammar: esc(state.grammar_percent),
+            wordlist: esc(wordlist)
+        }), {
+            parse_mode: 'HTML',
+            ...Markup.inlineKeyboard([
+                [
+                    Markup.button.callback(buttonByLang(lang, 'common.confirm'), 'result_confirm'),
+                    Markup.button.callback(buttonByLang(lang, 'common.cancel'), 'result_cancel')
+                ]
+            ])
+        });
+        return;
+    }
+
+    if (state?.step === STATES.RESULT_CREATE_CONFIRM && ctx.chat.type === 'private' && isTeacher(ctx)) {
+        await ctx.reply(textByLang(lang, 'text.resultConfirmText', {
+            name: esc(state.name),
+            grammar: esc(state.grammar_percent),
+            wordlist: esc(state.wordlist_percent)
+        }), {
+            parse_mode: 'HTML',
+            ...Markup.inlineKeyboard([
+                [
+                    Markup.button.callback(buttonByLang(lang, 'common.confirm'), 'result_confirm'),
+                    Markup.button.callback(buttonByLang(lang, 'common.cancel'), 'result_cancel')
+                ]
+            ])
+        });
         return;
     }
 
@@ -1054,29 +1502,29 @@ bot.on('message', async (ctx) => {
     if (!state) return;
 
     if (state.step === STATES.SET_HOMEWORK) {
-        contentStore[CONTENT_KEYS.homework] = { chatId: ctx.chat.id, messageId: ctx.message.message_id };
-        userStates.delete(fromId);
+        await persistContent(CONTENT_KEYS.homework, ctx.chat.id, ctx.message.message_id);
+        await setUserState(fromId, null);
         await ctx.reply(textByLang(lang, 'text.contentUpdatedHomework'), buildMenu(lang, ctx));
         return;
     }
 
     if (state.step === STATES.SET_VOCABULARY) {
-        contentStore[CONTENT_KEYS.vocabulary] = { chatId: ctx.chat.id, messageId: ctx.message.message_id };
-        userStates.delete(fromId);
+        await persistContent(CONTENT_KEYS.vocabulary, ctx.chat.id, ctx.message.message_id);
+        await setUserState(fromId, null);
         await ctx.reply(textByLang(lang, 'text.contentUpdatedVocabulary'), buildMenu(lang, ctx));
         return;
     }
 
     if (state.step === STATES.SET_MATERIALS) {
-        contentStore[CONTENT_KEYS.materials] = { chatId: ctx.chat.id, messageId: ctx.message.message_id };
-        userStates.delete(fromId);
+        await persistContent(CONTENT_KEYS.materials, ctx.chat.id, ctx.message.message_id);
+        await setUserState(fromId, null);
         await ctx.reply(textByLang(lang, 'text.contentUpdatedMaterials'), buildMenu(lang, ctx));
         return;
     }
 
     if (state.step === STATES.NEWS) {
         await bot.telegram.copyMessage(CHAT_IDS.group, ctx.chat.id, ctx.message.message_id);
-        userStates.delete(fromId);
+        await setUserState(fromId, null);
         await ctx.reply(textByLang(lang, 'text.sentToGroup'), buildMenu(lang, ctx));
         return;
     }
@@ -1092,7 +1540,7 @@ bot.on('message', async (ctx) => {
         );
 
         await bot.telegram.copyMessage(ROLE_IDS.owner, ctx.chat.id, ctx.message.message_id);
-        userStates.delete(fromId);
+        await setUserState(fromId, null);
         await ctx.reply(textByLang(lang, 'text.feedbackSent'), buildMenu(lang, ctx));
         return;
     }
@@ -1107,7 +1555,7 @@ bot.on('message', async (ctx) => {
             }
         }
 
-        userStates.delete(fromId);
+        await setUserState(fromId, null);
         await ctx.reply(textByLang(lang, 'text.broadcastDone'), buildMenu(lang, ctx));
     }
 });
