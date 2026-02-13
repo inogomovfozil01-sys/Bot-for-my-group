@@ -10,6 +10,8 @@ const LANGUAGES = {
                 homework: 'Узнать ДЗ',
                 vocabulary: 'Новые слова',
                 materials: 'Материалы',
+                results: 'Результаты',
+                gift: 'Подарить',
                 help: 'Помощь (Учителю)',
                 feedback: 'Директору (Лично)'
             },
@@ -17,7 +19,9 @@ const LANGUAGES = {
                 setHomework: 'Выдать ДЗ',
                 setVocabulary: 'Изм. слова',
                 setMaterials: 'Изм. материалы',
-                sendNews: 'В группу'
+                sendNews: 'В группу',
+                resultsPanel: 'Выдать результаты',
+                createResult: 'Создать результат'
             },
             owner: {
                 broadcastAll: 'Рассылка (Медиа)',
@@ -29,6 +33,7 @@ const LANGUAGES = {
                 confirm: 'Подтвердить',
                 cancel: 'Отменить',
                 finish: 'Завершить диалог',
+                back: 'Назад',
                 changeLanguage: 'Язык / Language'
             },
             moderation: {
@@ -75,6 +80,26 @@ const LANGUAGES = {
             vocabularyTitle: '<b>НОВЫЕ СЛОВА</b>',
             materialsTitle: '<b>МАТЕРИАЛЫ</b>',
             noContent: 'Пока не добавлено.',
+            noResults: 'Результатов пока нет.',
+            resultsMenuStudent: '<b>Результаты</b>\nВыберите ученика:',
+            resultsMenuTeacher: '<b>Выдача результатов</b>\nВыберите действие:',
+            resultViewTitle: '<b>Результат ученика: {name}</b>',
+            resultViewGrammar: 'Grammar: <b>{grammar}%</b>',
+            resultViewWordList: 'WordList: <b>{wordlist}%</b>',
+            resultAskName: 'Введите имя ученика.',
+            resultAskGrammar: 'Напишите проценты по grammar (0-100).',
+            resultAskWordList: 'Напишите проценты по WordList (0-100).',
+            resultInvalidPercent: 'Введите число от 0 до 100.',
+            resultConfirmText: 'Проверьте результат:\n\nИмя: <b>{name}</b>\nGrammar: <b>{grammar}%</b>\nWordList: <b>{wordlist}%</b>',
+            resultSaved: 'Результат сохранен.',
+            resultCanceled: 'Создание результата отменено.',
+
+            giftTitle: 'Подарок для бота',
+            giftDescription: 'Нажимая оплату, вы отправляете боту 30 Stars.',
+            giftLabel: '30 Stars',
+            giftSent: 'Счет на 30 Stars отправлен.',
+            giftPaid: 'Спасибо за подарок. Платеж на 30 Stars получен.',
+            giftFail: 'Не удалось создать платеж. Попробуйте позже.',
 
             adminSelectUser: '<b>МОДЕРАЦИЯ ГРУППЫ</b>\nВыберите ученика:',
             adminUserActions: '<b>Управление пользователем</b>\n{name}\n\nВыберите действие:',
@@ -121,6 +146,8 @@ const LANGUAGES = {
                 homework: 'Homework',
                 vocabulary: 'Vocabulary',
                 materials: 'Materials',
+                results: 'Results',
+                gift: 'Gift',
                 help: 'Help (Teacher)',
                 feedback: 'To Director (Private)'
             },
@@ -128,7 +155,9 @@ const LANGUAGES = {
                 setHomework: 'Set Homework',
                 setVocabulary: 'Set Vocabulary',
                 setMaterials: 'Set Materials',
-                sendNews: 'Post to Group'
+                sendNews: 'Post to Group',
+                resultsPanel: 'Issue Results',
+                createResult: 'Create Result'
             },
             owner: {
                 broadcastAll: 'Broadcast (Media)',
@@ -140,6 +169,7 @@ const LANGUAGES = {
                 confirm: 'Confirm',
                 cancel: 'Cancel',
                 finish: 'Finish dialog',
+                back: 'Back',
                 changeLanguage: 'Language / Язык'
             },
             moderation: {
@@ -186,6 +216,26 @@ const LANGUAGES = {
             vocabularyTitle: '<b>VOCABULARY</b>',
             materialsTitle: '<b>MATERIALS</b>',
             noContent: 'Nothing has been added yet.',
+            noResults: 'No results yet.',
+            resultsMenuStudent: '<b>Results</b>\nSelect a student:',
+            resultsMenuTeacher: '<b>Results panel</b>\nChoose an action:',
+            resultViewTitle: '<b>Student result: {name}</b>',
+            resultViewGrammar: 'Grammar: <b>{grammar}%</b>',
+            resultViewWordList: 'WordList: <b>{wordlist}%</b>',
+            resultAskName: 'Enter student name.',
+            resultAskGrammar: 'Enter Grammar percent (0-100).',
+            resultAskWordList: 'Enter WordList percent (0-100).',
+            resultInvalidPercent: 'Enter a number from 0 to 100.',
+            resultConfirmText: 'Please confirm:\n\nName: <b>{name}</b>\nGrammar: <b>{grammar}%</b>\nWordList: <b>{wordlist}%</b>',
+            resultSaved: 'Result saved.',
+            resultCanceled: 'Result creation canceled.',
+
+            giftTitle: 'Gift for the bot',
+            giftDescription: 'By paying, you send 30 Stars to the bot.',
+            giftLabel: '30 Stars',
+            giftSent: 'Invoice for 30 Stars has been sent.',
+            giftPaid: 'Thank you. Payment of 30 Stars received.',
+            giftFail: 'Failed to create invoice. Please try later.',
 
             adminSelectUser: '<b>GROUP MODERATION</b>\nSelect a student:',
             adminUserActions: '<b>User management</b>\n{name}\n\nChoose an action:',
