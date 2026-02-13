@@ -1,7 +1,7 @@
 module.exports = {
     TOKEN: process.env.BOT_TOKEN || '8529939811:AAEE2XMUZ5RkMxqWHLL86OBSGW45-sIoQzQ',
-    OWNER_ID: process.env.OWNER_ID || '6690476979',
-    TEACHER_ID: process.env.TEACHER_ID || '5092858512',
+    OWNER_ID: process.env.OWNER_ID || '5092858512',
+    TEACHER_ID: process.env.TEACHER_ID || '6690476979',
     GROUP_ID: process.env.GROUP_ID || '-1002582621647',
 
     // Chat where teacher support threads are created (forum supergroup recommended)
@@ -10,6 +10,7 @@ module.exports = {
     // Postgres connection string
     DATABASE_URL: process.env.DATABASE_URL || 'postgresql://postgres:JPGaDBzwPaKlKTFAWxOdkMazIxopCwoU@postgres.railway.internal:5432/railway',
 };
+
 
 
 
