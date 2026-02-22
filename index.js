@@ -112,6 +112,110 @@ function buttonByLang(lang, path) {
     return textByLang(lang, `buttons.${path}`);
 }
 
+function uiText(lang, key) {
+    const dict = {
+        ru: {
+            helpStudent: [
+                '<b>Справка ученика</b>',
+                '/menu - открыть главное меню',
+                '/cancel - отменить текущий шаг',
+                '/lang - выбрать язык',
+                '',
+                'Разделы:',
+                `- ${buttonByLang('ru', 'student.homework')}`,
+                `- ${buttonByLang('ru', 'student.vocabulary')}`,
+                `- ${buttonByLang('ru', 'student.materials')}`,
+                `- ${buttonByLang('ru', 'student.results')}`,
+                `- ${buttonByLang('ru', 'student.help')}`,
+                `- ${buttonByLang('ru', 'student.feedback')}`
+            ].join('\n'),
+            helpTeacher: [
+                '<b>Справка преподавателя</b>',
+                '/menu - открыть главное меню',
+                '/cancel - отменить текущий шаг',
+                '',
+                'Разделы:',
+                `- ${buttonByLang('ru', 'teacher.setHomework')}`,
+                `- ${buttonByLang('ru', 'teacher.setVocabulary')}`,
+                `- ${buttonByLang('ru', 'teacher.setMaterials')}`,
+                `- ${buttonByLang('ru', 'teacher.resultsPanel')}`,
+                `- ${buttonByLang('ru', 'teacher.sendNews')}`,
+                `- ${buttonByLang('ru', 'owner.adminPanel')}`
+            ].join('\n'),
+            helpOwner: [
+                '<b>Справка владельца</b>',
+                '/menu - открыть главное меню',
+                '/cancel - отменить текущий шаг',
+                '/dbstatus - статус базы данных',
+                '/sync_topics - синхронизация тем учеников',
+                '',
+                'Разделы:',
+                `- ${buttonByLang('ru', 'owner.broadcastAll')}`,
+                `- ${buttonByLang('ru', 'owner.adminPanel')}`,
+                `- ${buttonByLang('ru', 'owner.phones')}`,
+                `- ${buttonByLang('ru', 'owner.stats')}`
+            ].join('\n'),
+            cancelDone: 'Текущее действие отменено.',
+            noActiveAction: 'Активных действий нет.',
+            sendToGroupFailed: 'Не удалось отправить сообщение в группу. Повторите попытку.',
+            feedbackFailed: 'Не удалось отправить сообщение директору. Повторите попытку.',
+            unexpectedError: 'Произошла ошибка. Повторите попытку.',
+            broadcastReport: 'Рассылка завершена.\n\nУспешно: <b>{sent}</b>\nОшибки: <b>{failed}</b>'
+        },
+        en: {
+            helpStudent: [
+                '<b>Student Help</b>',
+                '/menu - open main menu',
+                '/cancel - cancel current step',
+                '/lang - choose language',
+                '',
+                'Sections:',
+                `- ${buttonByLang('en', 'student.homework')}`,
+                `- ${buttonByLang('en', 'student.vocabulary')}`,
+                `- ${buttonByLang('en', 'student.materials')}`,
+                `- ${buttonByLang('en', 'student.results')}`,
+                `- ${buttonByLang('en', 'student.help')}`,
+                `- ${buttonByLang('en', 'student.feedback')}`
+            ].join('\n'),
+            helpTeacher: [
+                '<b>Teacher Help</b>',
+                '/menu - open main menu',
+                '/cancel - cancel current step',
+                '',
+                'Sections:',
+                `- ${buttonByLang('en', 'teacher.setHomework')}`,
+                `- ${buttonByLang('en', 'teacher.setVocabulary')}`,
+                `- ${buttonByLang('en', 'teacher.setMaterials')}`,
+                `- ${buttonByLang('en', 'teacher.resultsPanel')}`,
+                `- ${buttonByLang('en', 'teacher.sendNews')}`,
+                `- ${buttonByLang('en', 'owner.adminPanel')}`
+            ].join('\n'),
+            helpOwner: [
+                '<b>Owner Help</b>',
+                '/menu - open main menu',
+                '/cancel - cancel current step',
+                '/dbstatus - database status',
+                '/sync_topics - sync student topics',
+                '',
+                'Sections:',
+                `- ${buttonByLang('en', 'owner.broadcastAll')}`,
+                `- ${buttonByLang('en', 'owner.adminPanel')}`,
+                `- ${buttonByLang('en', 'owner.phones')}`,
+                `- ${buttonByLang('en', 'owner.stats')}`
+            ].join('\n'),
+            cancelDone: 'Current action canceled.',
+            noActiveAction: 'No active actions.',
+            sendToGroupFailed: 'Failed to send to group. Please retry.',
+            feedbackFailed: 'Failed to send feedback to director. Please retry.',
+            unexpectedError: 'Unexpected error. Please try again.',
+            broadcastReport: 'Broadcast completed.\n\nDelivered: <b>{sent}</b>\nFailed: <b>{failed}</b>'
+        }
+    };
+
+    const normalized = normalizeLang(lang);
+    return dict[normalized]?.[key] || dict.ru[key] || '';
+}
+
 function normalizePercent(value) {
     const num = Number(String(value || '').trim().replace(',', '.'));
     if (!Number.isFinite(num) || num < 0 || num > 100) return null;
@@ -657,28 +761,31 @@ async function ensureStudentAccess(ctx) {
 function buildMenu(lang, ctx) {
     if (isOwner(ctx)) {
         return Markup.keyboard([
-            [buttonByLang(lang, 'student.homework'), buttonByLang(lang, 'student.vocabulary'), buttonByLang(lang, 'student.materials')],
-            [buttonByLang(lang, 'student.results'), buttonByLang(lang, 'student.gift')],
-            [buttonByLang(lang, 'teacher.setHomework'), buttonByLang(lang, 'teacher.resultsPanel')],
-            [buttonByLang(lang, 'teacher.setVocabulary'), buttonByLang(lang, 'teacher.setMaterials')],
+            [buttonByLang(lang, 'student.homework'), buttonByLang(lang, 'student.vocabulary')],
+            [buttonByLang(lang, 'student.materials'), buttonByLang(lang, 'student.results')],
+            [buttonByLang(lang, 'student.help'), buttonByLang(lang, 'student.feedback')],
+            [buttonByLang(lang, 'teacher.setHomework'), buttonByLang(lang, 'teacher.setVocabulary')],
+            [buttonByLang(lang, 'teacher.setMaterials'), buttonByLang(lang, 'teacher.resultsPanel')],
             [buttonByLang(lang, 'teacher.sendNews'), buttonByLang(lang, 'owner.broadcastAll')],
-            [buttonByLang(lang, 'owner.adminPanel'), buttonByLang(lang, 'owner.phones'), buttonByLang(lang, 'owner.stats')]
+            [buttonByLang(lang, 'owner.adminPanel'), buttonByLang(lang, 'owner.phones')],
+            [buttonByLang(lang, 'owner.stats'), buttonByLang(lang, 'student.gift')]
         ]).resize();
     }
 
     if (isTeacher(ctx)) {
         return Markup.keyboard([
-            [buttonByLang(lang, 'teacher.setHomework'), buttonByLang(lang, 'teacher.resultsPanel')],
-            [buttonByLang(lang, 'teacher.setVocabulary'), buttonByLang(lang, 'teacher.setMaterials')],
-            [buttonByLang(lang, 'teacher.sendNews'), buttonByLang(lang, 'owner.adminPanel'), buttonByLang(lang, 'owner.phones')]
+            [buttonByLang(lang, 'teacher.setHomework'), buttonByLang(lang, 'teacher.setVocabulary')],
+            [buttonByLang(lang, 'teacher.setMaterials'), buttonByLang(lang, 'teacher.resultsPanel')],
+            [buttonByLang(lang, 'teacher.sendNews'), buttonByLang(lang, 'owner.adminPanel')],
+            [buttonByLang(lang, 'owner.phones'), buttonByLang(lang, 'owner.stats')]
         ]).resize();
     }
 
     return Markup.keyboard([
         [buttonByLang(lang, 'student.homework'), buttonByLang(lang, 'student.vocabulary')],
-        [buttonByLang(lang, 'student.materials'), buttonByLang(lang, 'student.help')],
-        [buttonByLang(lang, 'student.results'), buttonByLang(lang, 'student.gift')],
-        [buttonByLang(lang, 'student.feedback')],
+        [buttonByLang(lang, 'student.materials'), buttonByLang(lang, 'student.results')],
+        [buttonByLang(lang, 'student.help'), buttonByLang(lang, 'student.feedback')],
+        [buttonByLang(lang, 'student.gift')],
         [buttonByLang(lang, 'common.changeLanguage')]
     ]).resize();
 }
@@ -692,6 +799,38 @@ async function sendMainMenu(ctx) {
             : textByLang(lang, 'menus.student');
 
     await ctx.reply(title, { parse_mode: 'HTML', ...buildMenu(lang, ctx) });
+}
+
+async function showDefaultPrivateScreen(ctx) {
+    if (ctx.chat?.type !== 'private') return;
+
+    if (!isTeacher(ctx)) {
+        if (!(await hasSelectedLanguage(ctx.from.id))) {
+            await sendLanguageSelector(ctx, true);
+            return;
+        }
+        await runStudentOnboarding(ctx);
+        return;
+    }
+
+    await sendMainMenu(ctx);
+}
+
+function helpMessageByRole(lang, ctx) {
+    if (isOwner(ctx)) return uiText(lang, 'helpOwner');
+    if (isTeacher(ctx)) return uiText(lang, 'helpTeacher');
+    return uiText(lang, 'helpStudent');
+}
+
+async function sendStartGreeting(ctx) {
+    const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    const key = isOwner(ctx)
+        ? 'text.startGreetingOwner'
+        : isTeacher(ctx)
+            ? 'text.startGreetingTeacher'
+            : 'text.startGreetingStudent';
+
+    await ctx.reply(textByLang(lang, key), { parse_mode: 'HTML' });
 }
 
 function resultListKeyboard(lang, results, includeCreate = false) {
@@ -755,6 +894,7 @@ async function sendLanguageSelector(ctx, forceStartPrompt = false) {
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
     const prompt = forceStartPrompt ? textByLang('ru', 'text.languagePromptStart') : textByLang(lang, 'text.languagePrompt');
     await ctx.reply(prompt, {
+        parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
             [Markup.button.callback(buttonByLang('ru', 'language.russian'), 'lang_ru')],
             [Markup.button.callback(buttonByLang('en', 'language.english'), 'lang_en')]
@@ -844,11 +984,48 @@ bot.start(async (ctx) => {
             await sendLanguageSelector(ctx, true);
             return;
         }
+        await sendStartGreeting(ctx);
         await runStudentOnboarding(ctx);
         return;
     }
 
+    await sendStartGreeting(ctx);
     await sendMainMenu(ctx);
+});
+
+bot.command('menu', async (ctx) => {
+    await showDefaultPrivateScreen(ctx);
+});
+
+bot.command('help', async (ctx) => {
+    if (ctx.chat?.type !== 'private') return;
+
+    if (!isTeacher(ctx) && !(await hasSelectedLanguage(ctx.from.id))) {
+        await sendLanguageSelector(ctx, true);
+        return;
+    }
+
+    const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    await ctx.reply(helpMessageByRole(lang, ctx), { parse_mode: 'HTML' });
+});
+
+bot.command('cancel', async (ctx) => {
+    if (ctx.chat?.type !== 'private') return;
+
+    const fromId = toId(ctx.from.id);
+    const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    const state = await getUserState(fromId);
+    const hadDialog = dialogs.has(fromId);
+
+    if (!state && !hadDialog) {
+        await ctx.reply(uiText(lang, 'noActiveAction'));
+        return;
+    }
+
+    dialogs.delete(fromId);
+    await setUserState(fromId, null);
+    await ctx.reply(uiText(lang, 'cancelDone'));
+    await showDefaultPrivateScreen(ctx);
 });
 
 bot.command('lang', async (ctx) => {
@@ -1082,6 +1259,7 @@ bot.on('callback_query', async (ctx) => {
             return;
         }
 
+        const hadSelectedLanguage = await hasSelectedLanguage(ctx.from.id);
         const selected = data.replace('lang_', '');
         await setUserLang(ctx.from.id, selected, {
             first_name: ctx.from.first_name,
@@ -1102,6 +1280,9 @@ bot.on('callback_query', async (ctx) => {
             return;
         }
 
+        if (!hadSelectedLanguage) {
+            await sendStartGreeting(ctx);
+        }
         await runStudentOnboarding(ctx);
         return;
     }
@@ -1523,23 +1704,37 @@ bot.on('message', async (ctx) => {
     }
 
     if (state.step === STATES.NEWS) {
-        await bot.telegram.copyMessage(CHAT_IDS.group, ctx.chat.id, ctx.message.message_id);
+        try {
+            await bot.telegram.copyMessage(CHAT_IDS.group, ctx.chat.id, ctx.message.message_id);
+        } catch (e) {
+            console.error('Group publish error:', e.message);
+            await ctx.reply(uiText(lang, 'sendToGroupFailed'));
+            return;
+        }
+
         await setUserState(fromId, null);
         await ctx.reply(textByLang(lang, 'text.sentToGroup'), buildMenu(lang, ctx));
         return;
     }
 
     if (state.step === STATES.FEEDBACK) {
-        await bot.telegram.sendMessage(
-            ROLE_IDS.owner,
-            textByLang(lang, 'text.ownerFeedbackHeader', {
-                name: esc(ctx.from.first_name || 'Student'),
-                id: fromId
-            }),
-            { parse_mode: 'HTML' }
-        );
+        try {
+            await bot.telegram.sendMessage(
+                ROLE_IDS.owner,
+                textByLang(lang, 'text.ownerFeedbackHeader', {
+                    name: esc(ctx.from.first_name || 'Student'),
+                    id: fromId
+                }),
+                { parse_mode: 'HTML' }
+            );
 
-        await bot.telegram.copyMessage(ROLE_IDS.owner, ctx.chat.id, ctx.message.message_id);
+            await bot.telegram.copyMessage(ROLE_IDS.owner, ctx.chat.id, ctx.message.message_id);
+        } catch (e) {
+            console.error('Feedback forwarding error:', e.message);
+            await ctx.reply(uiText(lang, 'feedbackFailed'));
+            return;
+        }
+
         await setUserState(fromId, null);
         await ctx.reply(textByLang(lang, 'text.feedbackSent'), buildMenu(lang, ctx));
         return;
@@ -1547,21 +1742,77 @@ bot.on('message', async (ctx) => {
 
     if (state.step === STATES.BROADCAST) {
         const students = await getStudentsForModeration();
+        let sent = 0;
+        let failed = 0;
+
         for (const student of students) {
             try {
                 await bot.telegram.copyMessage(student.user_id, ctx.chat.id, ctx.message.message_id);
+                sent += 1;
             } catch {
-                // ignore blocked users
+                failed += 1;
             }
         }
 
         await setUserState(fromId, null);
-        await ctx.reply(textByLang(lang, 'text.broadcastDone'), buildMenu(lang, ctx));
+        const report = template(uiText(lang, 'broadcastReport'), { sent, failed });
+        await ctx.reply(report, { parse_mode: 'HTML', ...buildMenu(lang, ctx) });
     }
 });
 
-bot.launch().then(() => {
-    console.log('BOT STARTED');
+bot.catch(async (err, ctx) => {
+    console.error('Bot runtime error:', err);
+
+    try {
+        if (ctx?.chat?.type === 'private' && ctx?.from?.id) {
+            const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+            await ctx.reply(uiText(lang, 'unexpectedError'));
+        }
+    } catch {
+        // ignore fallback errors
+    }
 });
+
+let shuttingDown = false;
+
+async function gracefulShutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    console.log(`${signal} received. Shutting down...`);
+
+    try {
+        await bot.stop(signal);
+    } catch (e) {
+        console.error('Bot stop error:', e.message);
+    }
+
+    if (pool) {
+        try {
+            await pool.end();
+        } catch (e) {
+            console.error('Pool close error:', e.message);
+        }
+    }
+
+    process.exit(0);
+}
+
+process.once('SIGINT', () => {
+    void gracefulShutdown('SIGINT');
+});
+
+process.once('SIGTERM', () => {
+    void gracefulShutdown('SIGTERM');
+});
+
+bot.launch()
+    .then(() => {
+        console.log('BOT STARTED');
+    })
+    .catch((e) => {
+        console.error('Bot launch error:', e.message);
+        process.exit(1);
+    });
 
 initDB();
