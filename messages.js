@@ -43,6 +43,7 @@ const LANGUAGES = {
                 unban: 'Разблокировать',
                 deleteLast: 'Удалить последнее сообщение',
                 kick: 'Исключить из группы',
+                requestName: 'Запросить имя',
                 back: 'Назад'
             },
             language: {
@@ -110,6 +111,7 @@ const LANGUAGES = {
             noRights: 'Нет прав',
             actionDone: 'Действие выполнено.',
             actionError: 'Ошибка: {error}',
+            renameRequestSent: 'Ученику отправлен запрос на имя.',
             usersReadError: 'Ошибка загрузки списка.',
 
             phonesTitle: '<b>КОНТАКТЫ УЧЕНИКОВ</b>',
@@ -134,6 +136,8 @@ const LANGUAGES = {
             languagePrompt: 'Выберите язык интерфейса.',
             languagePromptStart: '<b>18:00-Inter |*| Fozil |  DevZone</b>\nВыберите язык интерфейса / Choose interface language.',
             languageChanged: 'Язык интерфейса переключен на русский.',
+            renamePrompt: 'Владелец попросил указать корректное имя.\nВведите имя заново.',
+            renameSaved: 'Имя обновлено.',
 
             ownerFeedbackHeader: 'Обратная связь от {name} ({id})'
         }
@@ -182,6 +186,7 @@ const LANGUAGES = {
                 unban: 'Unban',
                 deleteLast: 'Delete Last Message',
                 kick: 'Remove from Group',
+                requestName: 'Request Name',
                 back: 'Back'
             },
             language: {
@@ -249,6 +254,7 @@ const LANGUAGES = {
             noRights: 'No rights',
             actionDone: 'Action completed.',
             actionError: 'Error: {error}',
+            renameRequestSent: 'Name request sent to the student.',
             usersReadError: 'Failed to load user list.',
 
             phonesTitle: '<b>STUDENT CONTACTS</b>',
@@ -273,6 +279,8 @@ const LANGUAGES = {
             languagePrompt: 'Choose interface language.',
             languagePromptStart: '<b>18:00-Inter |*| Fozil |  DevZone</b>\nChoose interface language / Выберите язык интерфейса.',
             languageChanged: 'Interface language switched to English.',
+            renamePrompt: 'The owner asked you to provide a proper name.\nPlease enter it again.',
+            renameSaved: 'Name updated.',
 
             ownerFeedbackHeader: 'Feedback from {name} ({id})'
         }
