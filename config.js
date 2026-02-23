@@ -8,5 +8,6 @@ module.exports = {
     TEACHER_CHAT_ID: process.env.TEACHER_CHAT_ID || process.env.GROUP_ID || '-1003546840118',
 
     // Postgres connection string
-    DATABASE_URL: process.env.DATABASE_URL || 'postgresql://postgres:ILpVFIbpLIboOkrGeTJQopjppbaoRZac@postgres-3rwb.railway.internal:5432/railway',
+    DATABASE_URL: process.env.DATABASE_URL || 'postgresql://postgres:ZrpFafPDeqCYbTujpGjXzacdwENFZtiw@postgres-afeu.railway.internal:5432/railway',
 };
+
