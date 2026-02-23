@@ -24,6 +24,7 @@ const CONTENT_KEYS = {
 const STATES = {
     REGISTER_NAME: 'REGISTER_NAME',
     REGISTER_PHONE: 'REGISTER_PHONE',
+    OWNER_RENAME_NAME: 'OWNER_RENAME_NAME',
     SET_HOMEWORK: 'SET_HOMEWORK',
     SET_VOCABULARY: 'SET_VOCABULARY',
     SET_MATERIALS: 'SET_MATERIALS',
@@ -681,12 +682,6 @@ async function ensureStudentTopic(from, preferredName) {
     const safeName = String(baseName).slice(0, 120);
 
     if (existing) {
-        try {
-            await bot.telegram.editForumTopic(CHAT_IDS.teacherChat, existing, { name: safeName });
-        } catch (e) {
-            console.error('Forum topic rename error:', e.message);
-        }
-        await saveStudentTopic(userId, existing, safeName);
         return existing;
     }
 
@@ -967,6 +962,7 @@ function moderationInlineKeyboard(lang, targetId) {
         ],
         [Markup.button.callback(buttonByLang(lang, 'moderation.deleteLast'), `delmsg_${targetId}`)],
         [Markup.button.callback(buttonByLang(lang, 'moderation.kick'), `kick_${targetId}`)],
+        [Markup.button.callback(buttonByLang(lang, 'moderation.requestName'), `askname_${targetId}`)],
         [Markup.button.callback(buttonByLang(lang, 'moderation.back'), 'back_to_admin')]
     ]);
 }
@@ -975,7 +971,6 @@ bot.start(async (ctx) => {
     if (ctx.chat?.type !== 'private') return;
 
     await upsertUserRecord(ctx.from.id, {
-        first_name: ctx.from.first_name,
         username: ctx.from.username || ''
     });
 
@@ -1262,7 +1257,6 @@ bot.on('callback_query', async (ctx) => {
         const hadSelectedLanguage = await hasSelectedLanguage(ctx.from.id);
         const selected = data.replace('lang_', '');
         await setUserLang(ctx.from.id, selected, {
-            first_name: ctx.from.first_name,
             username: ctx.from.username || ''
         });
 
@@ -1356,6 +1350,31 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
+    if (data.startsWith('askname_')) {
+        if (!isTeacher(ctx)) {
+            await ctx.answerCbQuery(textByLang(lang, 'text.noRights'));
+            return;
+        }
+
+        const targetId = toId(data.split('_')[1] || '');
+        if (!targetId) {
+            await ctx.answerCbQuery();
+            return;
+        }
+
+        try {
+            const targetLang = await getUserLang(targetId);
+            await setUserState(targetId, { step: STATES.OWNER_RENAME_NAME });
+            dialogs.delete(targetId);
+
+            await bot.telegram.sendMessage(targetId, textByLang(targetLang, 'text.renamePrompt'), Markup.removeKeyboard());
+            await ctx.answerCbQuery(textByLang(lang, 'text.renameRequestSent'));
+        } catch (e) {
+            await ctx.answerCbQuery(textByLang(lang, 'text.actionError', { error: e.message }), { show_alert: true });
+        }
+        return;
+    }
+
     const [action, target] = data.split('_');
     if (!['mute', 'unmute', 'ban', 'unban', 'kick', 'delmsg'].includes(action)) return;
 
@@ -1421,7 +1440,6 @@ bot.on('message', async (ctx) => {
     const chatId = toId(ctx.chat?.id);
 
     await upsertUserRecord(fromId, {
-        first_name: ctx.from?.first_name || '',
         username: ctx.from?.username || ''
     });
 
@@ -1495,6 +1513,22 @@ bot.on('message', async (ctx) => {
     const state = await getUserState(fromId);
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
     const text = String(ctx.message.text || '').trim();
+
+    if (state?.step === STATES.OWNER_RENAME_NAME && ctx.chat.type === 'private' && !isTeacher(ctx)) {
+        const studentName = text;
+        if (studentName.length < 2) {
+            await ctx.reply(textByLang(lang, 'text.askNameInvalid'));
+            return;
+        }
+
+        await upsertUserRecord(fromId, {
+            first_name: studentName,
+            username: ctx.from.username || ''
+        });
+        await setUserState(fromId, null);
+        await ctx.reply(textByLang(lang, 'text.renameSaved'), buildMenu(lang, ctx));
+        return;
+    }
 
     if (state?.step === STATES.REGISTER_NAME && ctx.chat.type === 'private' && !isTeacher(ctx)) {
         const studentName = text;
@@ -1816,3 +1850,4 @@ bot.launch()
     });
 
 initDB();
+
