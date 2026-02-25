@@ -12,8 +12,17 @@ const ROLE_IDS = {
 
 const CHAT_IDS = {
     group: String(config.GROUP_ID),
-    teacherChat: String(config.TEACHER_CHAT_ID)
+    teacherChat: String(config.TEACHER_CHAT_ID),
+    // Director feedback thread must live inside teacher forum chat.
+    directorChat: String(config.TEACHER_CHAT_ID)
 };
+
+const BOT_SETTING_KEYS = {
+    directorFeedbackTopicId: 'director_feedback_topic_id'
+};
+
+const DIRECTOR_FEEDBACK_TOPIC_TITLE = String(config.DIRECTOR_FEEDBACK_TOPIC_TITLE || 'Director Feedback');
+let directorFeedbackTopicId = normalizeThreadId(config.DIRECTOR_FEEDBACK_TOPIC_ID);
 
 const CONTENT_KEYS = {
     homework: 'homework',
@@ -51,6 +60,7 @@ const lastGroupMessages = new Map();
 const memoryUsers = new Map();
 const studentTopicCache = new Map();
 const topicStudentCache = new Map();
+const directorFeedbackLinkCache = new Map();
 
 const contentStore = {
     [CONTENT_KEYS.homework]: null,
@@ -76,6 +86,16 @@ function esc(str = '') {
 
 function toId(value) {
     return String(value);
+}
+
+function normalizeThreadId(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return parsed;
+}
+
+function feedbackLinkKey(chatId, messageId) {
+    return `${toId(chatId)}:${Number(messageId)}`;
 }
 
 function isOwner(ctx) {
@@ -458,6 +478,24 @@ async function initDB() {
             );
         `);
 
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS director_feedback_links (
+                chat_id TEXT NOT NULL,
+                message_id BIGINT NOT NULL,
+                user_id TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, message_id)
+            );
+        `);
+
         const contentRes = await pool.query(`
             SELECT content_key, source_chat_id, source_message_id
             FROM bot_content
@@ -611,6 +649,97 @@ async function getStudentsForModeration() {
     return all.filter((u) => ![ROLE_IDS.owner, ROLE_IDS.teacher].includes(toId(u.user_id)));
 }
 
+async function getBotSetting(settingKey) {
+    if (!dbReady) return null;
+    try {
+        const res = await pool.query(
+            'SELECT setting_value FROM bot_settings WHERE setting_key = $1',
+            [settingKey]
+        );
+        if (res.rowCount < 1) return null;
+        return res.rows[0].setting_value;
+    } catch (e) {
+        console.error('DB read bot setting error:', e.message);
+        return null;
+    }
+}
+
+async function setBotSetting(settingKey, settingValue) {
+    if (!dbReady) return;
+    try {
+        await pool.query(
+            `INSERT INTO bot_settings (setting_key, setting_value)
+             VALUES ($1, $2)
+             ON CONFLICT (setting_key)
+             DO UPDATE SET
+                setting_value = EXCLUDED.setting_value,
+                updated_at = CURRENT_TIMESTAMP`,
+            [settingKey, String(settingValue)]
+        );
+    } catch (e) {
+        console.error('DB save bot setting error:', e.message);
+    }
+}
+
+async function saveDirectorFeedbackLink(chatId, messageId, userId) {
+    const normalizedChatId = toId(chatId);
+    const normalizedMessageId = Number(messageId);
+    const normalizedUserId = toId(userId);
+    if (!Number.isFinite(normalizedMessageId) || normalizedMessageId <= 0) return;
+
+    directorFeedbackLinkCache.set(feedbackLinkKey(normalizedChatId, normalizedMessageId), normalizedUserId);
+
+    if (!dbReady) return;
+    try {
+        await pool.query(
+            `INSERT INTO director_feedback_links (chat_id, message_id, user_id)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (chat_id, message_id)
+             DO UPDATE SET
+                user_id = EXCLUDED.user_id`,
+            [normalizedChatId, normalizedMessageId, normalizedUserId]
+        );
+    } catch (e) {
+        console.error('DB save director feedback link error:', e.message);
+    }
+}
+
+async function getDirectorFeedbackUserId(chatId, messageId) {
+    const normalizedChatId = toId(chatId);
+    const normalizedMessageId = Number(messageId);
+    if (!Number.isFinite(normalizedMessageId) || normalizedMessageId <= 0) return null;
+
+    const key = feedbackLinkKey(normalizedChatId, normalizedMessageId);
+    if (directorFeedbackLinkCache.has(key)) return directorFeedbackLinkCache.get(key);
+
+    if (!dbReady) return null;
+    try {
+        const res = await pool.query(
+            'SELECT user_id FROM director_feedback_links WHERE chat_id = $1 AND message_id = $2',
+            [normalizedChatId, normalizedMessageId]
+        );
+        if (res.rowCount < 1) return null;
+        const userId = toId(res.rows[0].user_id);
+        directorFeedbackLinkCache.set(key, userId);
+        return userId;
+    } catch (e) {
+        console.error('DB read director feedback link error:', e.message);
+        return null;
+    }
+}
+
+function getForwardedUserId(message) {
+    const directForwardUser = message?.forward_from?.id;
+    if (directForwardUser) return toId(directForwardUser);
+
+    const forwardOrigin = message?.forward_origin;
+    if (forwardOrigin?.type === 'user' && forwardOrigin.sender_user?.id) {
+        return toId(forwardOrigin.sender_user.id);
+    }
+
+    return null;
+}
+
 async function saveStudentTopic(userId, topicId, topicName) {
     const id = toId(userId);
     const thread = Number(topicId);
@@ -688,6 +817,69 @@ async function ensureStudentTopic(from, preferredName) {
     const topic = await bot.telegram.createForumTopic(CHAT_IDS.teacherChat, safeName);
     await saveStudentTopic(userId, topic.message_thread_id, safeName);
     return topic.message_thread_id;
+}
+
+async function ensureDirectorFeedbackTopicId() {
+    if (directorFeedbackTopicId) return directorFeedbackTopicId;
+
+    const storedTopicId = normalizeThreadId(await getBotSetting(BOT_SETTING_KEYS.directorFeedbackTopicId));
+    if (storedTopicId) {
+        directorFeedbackTopicId = storedTopicId;
+        return directorFeedbackTopicId;
+    }
+
+    const safeTopicTitle = DIRECTOR_FEEDBACK_TOPIC_TITLE.slice(0, 120);
+    const created = await bot.telegram.createForumTopic(CHAT_IDS.directorChat, safeTopicTitle);
+    const createdTopicId = normalizeThreadId(created?.message_thread_id);
+    if (!createdTopicId) throw new Error('Director feedback topic was not created');
+
+    directorFeedbackTopicId = createdTopicId;
+    await setBotSetting(BOT_SETTING_KEYS.directorFeedbackTopicId, directorFeedbackTopicId);
+    return directorFeedbackTopicId;
+}
+
+async function isDirectorFeedbackThread(threadId) {
+    const normalizedThreadId = normalizeThreadId(threadId);
+    if (!normalizedThreadId) return false;
+
+    if (directorFeedbackTopicId) return normalizedThreadId === directorFeedbackTopicId;
+
+    const configuredTopicId = normalizeThreadId(config.DIRECTOR_FEEDBACK_TOPIC_ID);
+    if (configuredTopicId) {
+        directorFeedbackTopicId = configuredTopicId;
+        return normalizedThreadId === configuredTopicId;
+    }
+
+    const storedTopicId = normalizeThreadId(await getBotSetting(BOT_SETTING_KEYS.directorFeedbackTopicId));
+    if (!storedTopicId) return false;
+    directorFeedbackTopicId = storedTopicId;
+    return normalizedThreadId === storedTopicId;
+}
+
+async function tryHandleDirectorFeedbackReply(ctx) {
+    if (!isTeacher(ctx)) return false;
+    if (toId(ctx.chat?.id) !== CHAT_IDS.directorChat) return false;
+
+    const threadId = normalizeThreadId(ctx.message?.message_thread_id);
+    if (!threadId) return false;
+    if (!(await isDirectorFeedbackThread(threadId))) return false;
+
+    const replied = ctx.message?.reply_to_message;
+    if (!replied) return false;
+
+    let studentId = await getDirectorFeedbackUserId(CHAT_IDS.directorChat, replied.message_id);
+    if (!studentId) {
+        studentId = getForwardedUserId(replied);
+    }
+    if (!studentId) return false;
+
+    try {
+        await bot.telegram.copyMessage(studentId, CHAT_IDS.directorChat, ctx.message.message_id);
+    } catch (e) {
+        console.error('Director feedback reply delivery error:', e.message);
+    }
+
+    return true;
 }
 
 async function sendStudentCardToTopic(from, studentName, phone, username) {
@@ -1465,6 +1657,11 @@ bot.on('message', async (ctx) => {
         }
     }
 
+    if (chatId === CHAT_IDS.directorChat) {
+        const deliveredToStudent = await tryHandleDirectorFeedbackReply(ctx);
+        if (deliveredToStudent) return;
+    }
+
     if (chatId === CHAT_IDS.teacherChat) {
         if (!isTeacher(ctx)) return;
 
@@ -1753,16 +1950,39 @@ bot.on('message', async (ctx) => {
 
     if (state.step === STATES.FEEDBACK) {
         try {
-            await bot.telegram.sendMessage(
-                ROLE_IDS.owner,
+            const feedbackTopicId = await ensureDirectorFeedbackTopicId();
+            const headerMessage = await bot.telegram.sendMessage(
+                CHAT_IDS.directorChat,
                 textByLang(lang, 'text.ownerFeedbackHeader', {
                     name: esc(ctx.from.first_name || 'Student'),
                     id: fromId
                 }),
-                { parse_mode: 'HTML' }
+                {
+                    parse_mode: 'HTML',
+                    message_thread_id: feedbackTopicId
+                }
             );
+            await saveDirectorFeedbackLink(CHAT_IDS.directorChat, headerMessage.message_id, fromId);
 
-            await bot.telegram.copyMessage(ROLE_IDS.owner, ctx.chat.id, ctx.message.message_id);
+            let forwardedMessage;
+            try {
+                forwardedMessage = await bot.telegram.forwardMessage(
+                    CHAT_IDS.directorChat,
+                    ctx.chat.id,
+                    ctx.message.message_id,
+                    { message_thread_id: feedbackTopicId }
+                );
+            } catch (forwardErr) {
+                console.error('Feedback forward error, using copy fallback:', forwardErr.message);
+                forwardedMessage = await bot.telegram.copyMessage(
+                    CHAT_IDS.directorChat,
+                    ctx.chat.id,
+                    ctx.message.message_id,
+                    { message_thread_id: feedbackTopicId }
+                );
+            }
+
+            await saveDirectorFeedbackLink(CHAT_IDS.directorChat, forwardedMessage.message_id, fromId);
         } catch (e) {
             console.error('Feedback forwarding error:', e.message);
             await ctx.reply(uiText(lang, 'feedbackFailed'));
@@ -1850,4 +2070,3 @@ bot.launch()
     });
 
 initDB();
-
