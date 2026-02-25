@@ -12,5 +12,6 @@ module.exports = {
     DIRECTOR_FEEDBACK_TOPIC_TITLE: process.env.DIRECTOR_FEEDBACK_TOPIC_TITLE || 'Director Feedback',
 
     // Postgres connection string
-    DATABASE_URL: process.env.DATABASE_URL || 'postgresql://postgres:ILpVFIbpLIboOkrGeTJQopjppbaoRZac@postgres-3rwb.railway.internal:5432/railway',
+    DATABASE_URL: process.env.DATABASE_URL || 'postgresql://postgres:ZrpFafPDeqCYbTujpGjXzacdwENFZtiw@postgres-afeu.railway.internal:5432/railway',
 };
+
