@@ -14,4 +14,3 @@ module.exports = {
     // Postgres connection string
     DATABASE_URL: process.env.DATABASE_URL || 'postgresql://postgres:ZrpFafPDeqCYbTujpGjXzacdwENFZtiw@postgres-afeu.railway.internal:5432/railway',
 };
-
