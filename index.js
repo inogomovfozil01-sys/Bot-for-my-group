@@ -13,7 +13,7 @@ const ROLE_IDS = {
 const CHAT_IDS = {
     group: String(config.GROUP_ID),
     teacherChat: String(config.TEACHER_CHAT_ID),
-    // Director feedback thread must live inside teacher forum chat.
+    // Support thread must live inside teacher forum chat.
     directorChat: String(config.TEACHER_CHAT_ID)
 };
 
@@ -21,7 +21,7 @@ const BOT_SETTING_KEYS = {
     directorFeedbackTopicId: 'director_feedback_topic_id'
 };
 
-const DIRECTOR_FEEDBACK_TOPIC_TITLE = String(config.DIRECTOR_FEEDBACK_TOPIC_TITLE || 'Director Feedback');
+const DIRECTOR_FEEDBACK_TOPIC_TITLE = String(config.DIRECTOR_FEEDBACK_TOPIC_TITLE || 'Tech Support');
 let directorFeedbackTopicId = normalizeThreadId(config.DIRECTOR_FEEDBACK_TOPIC_ID);
 
 const CONTENT_KEYS = {
@@ -61,6 +61,17 @@ const memoryUsers = new Map();
 const studentTopicCache = new Map();
 const topicStudentCache = new Map();
 const directorFeedbackLinkCache = new Map();
+const pendingMediaGroups = new Map();
+
+const MEDIA_GROUP_WINDOW_MS = 1200;
+const MEDIA_GROUP_STEPS = new Set([
+    STATES.SET_HOMEWORK,
+    STATES.SET_VOCABULARY,
+    STATES.SET_MATERIALS,
+    STATES.NEWS,
+    STATES.BROADCAST,
+    STATES.FEEDBACK
+]);
 
 const contentStore = {
     [CONTENT_KEYS.homework]: null,
@@ -96,6 +107,32 @@ function normalizeThreadId(value) {
 
 function feedbackLinkKey(chatId, messageId) {
     return `${toId(chatId)}:${Number(messageId)}`;
+}
+
+function mediaGroupKey(chatId, mediaGroupId) {
+    return `${toId(chatId)}:${String(mediaGroupId)}`;
+}
+
+function isSupportedMediaGroupStep(step) {
+    return MEDIA_GROUP_STEPS.has(step);
+}
+
+function extractInputMedia(message) {
+    const caption = message?.caption || undefined;
+    if (Array.isArray(message?.photo) && message.photo.length) {
+        const photo = message.photo[message.photo.length - 1];
+        return { type: 'photo', media: photo.file_id, caption };
+    }
+    if (message?.video?.file_id) {
+        return { type: 'video', media: message.video.file_id, caption };
+    }
+    if (message?.audio?.file_id) {
+        return { type: 'audio', media: message.audio.file_id, caption };
+    }
+    if (message?.document?.file_id) {
+        return { type: 'document', media: message.document.file_id, caption };
+    }
+    return null;
 }
 
 function isOwner(ctx) {
@@ -179,7 +216,7 @@ function uiText(lang, key) {
             cancelDone: 'Текущее действие отменено.',
             noActiveAction: 'Активных действий нет.',
             sendToGroupFailed: 'Не удалось отправить сообщение в группу. Повторите попытку.',
-            feedbackFailed: 'Не удалось отправить сообщение директору. Повторите попытку.',
+            feedbackFailed: 'Не удалось отправить сообщение в техподдержку. Повторите попытку.',
             unexpectedError: 'Произошла ошибка. Повторите попытку.',
             broadcastReport: 'Рассылка завершена.\n\nУспешно: <b>{sent}</b>\nОшибки: <b>{failed}</b>'
         },
@@ -227,7 +264,7 @@ function uiText(lang, key) {
             cancelDone: 'Current action canceled.',
             noActiveAction: 'No active actions.',
             sendToGroupFailed: 'Failed to send to group. Please retry.',
-            feedbackFailed: 'Failed to send feedback to director. Please retry.',
+            feedbackFailed: 'Failed to send message to support. Please retry.',
             unexpectedError: 'Unexpected error. Please try again.',
             broadcastReport: 'Broadcast completed.\n\nDelivered: <b>{sent}</b>\nFailed: <b>{failed}</b>'
         }
@@ -266,7 +303,8 @@ async function setUserState(userId, state = null) {
         userStates.delete(id);
         if (!dbReady) return;
         try {
-            await pool.query('DELETE FROM user_states WHERE user_id = $1', [id]);
+            awai
+             pool.query('DELETE FROM user_states WHERE user_id = $1', [id]);
         } catch (e) {
             console.error('DB delete user state error:', e.message);
         }
@@ -312,6 +350,15 @@ async function getUserState(userId) {
         console.error('DB read user state error:', e.message);
         return null;
     }
+}
+
+async function ensureRenameProvided(ctx) {
+    if (isTeacher(ctx)) return true;
+    const state = await getUserState(ctx.from.id);
+    if (state?.step !== STATES.OWNER_RENAME_NAME) return true;
+    const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    await ctx.reply(textByLang(lang, 'text.renamePrompt'), Markup.removeKeyboard());
+    return false;
 }
 
 async function upsertResult(result) {
@@ -468,6 +515,27 @@ async function initDB() {
         `);
 
         await pool.query(`
+            CREATE TABLE IF NOT EXISTS bot_content_media (
+                content_key TEXT NOT NULL,
+                position INT NOT NULL,
+                media_type TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                caption TEXT,
+                PRIMARY KEY (content_key, position)
+            );
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS bot_content_items (
+                content_key TEXT NOT NULL,
+                position INT NOT NULL,
+                source_chat_id TEXT NOT NULL,
+                source_message_id BIGINT NOT NULL,
+                PRIMARY KEY (content_key, position)
+            );
+        `);
+
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS student_results (
                 result_key TEXT PRIMARY KEY,
                 student_name TEXT NOT NULL,
@@ -503,9 +571,50 @@ async function initDB() {
         for (const row of contentRes.rows) {
             if (!Object.prototype.hasOwnProperty.call(contentStore, row.content_key)) continue;
             contentStore[row.content_key] = {
+                type: 'single',
                 chatId: row.source_chat_id,
                 messageId: Number(row.source_message_id)
             };
+        }
+
+        const contentMediaRes = await pool.query(`
+            SELECT content_key, position, media_type, file_id, caption
+            FROM bot_content_media
+            ORDER BY content_key, position
+        `);
+        const mediaByKey = new Map();
+        for (const row of contentMediaRes.rows) {
+            if (!Object.prototype.hasOwnProperty.call(contentStore, row.content_key)) continue;
+            if (!mediaByKey.has(row.content_key)) mediaByKey.set(row.content_key, []);
+            mediaByKey.get(row.content_key).push({
+                type: row.media_type,
+                media: row.file_id,
+                caption: row.caption || undefined
+            });
+        }
+        for (const [key, items] of mediaByKey.entries()) {
+            if (!items.length) continue;
+            contentStore[key] = { type: 'album', items };
+        }
+
+        const contentItemsRes = await pool.query(`
+            SELECT content_key, position, source_chat_id, source_message_id
+            FROM bot_content_items
+            ORDER BY content_key, position
+        `);
+        const itemsByKey = new Map();
+        for (const row of contentItemsRes.rows) {
+            if (!Object.prototype.hasOwnProperty.call(contentStore, row.content_key)) continue;
+            if (!itemsByKey.has(row.content_key)) itemsByKey.set(row.content_key, []);
+            itemsByKey.get(row.content_key).push({
+                chatId: row.source_chat_id,
+                messageId: Number(row.source_message_id)
+            });
+        }
+        for (const [key, items] of itemsByKey.entries()) {
+            if (!items.length) continue;
+            if (contentStore[key]?.type === 'album') continue;
+            contentStore[key] = { type: 'copy', items };
         }
 
         const resultRes = await pool.query(`
@@ -857,7 +966,6 @@ async function isDirectorFeedbackThread(threadId) {
 }
 
 async function tryHandleDirectorFeedbackReply(ctx) {
-    if (!isTeacher(ctx)) return false;
     if (toId(ctx.chat?.id) !== CHAT_IDS.directorChat) return false;
 
     const threadId = normalizeThreadId(ctx.message?.message_thread_id);
@@ -882,6 +990,192 @@ async function tryHandleDirectorFeedbackReply(ctx) {
     return true;
 }
 
+function normalizeMediaGroupMessages(messages) {
+    const byId = new Map();
+    for (const message of messages) {
+        if (!message?.message_id) continue;
+        byId.set(message.message_id, message);
+    }
+    return Array.from(byId.values()).sort((a, b) => a.message_id - b.message_id);
+}
+
+function buildMediaGroupPayload(messages) {
+    const items = [];
+    let hasUnsupported = false;
+    for (const message of messages) {
+        const media = extractInputMedia(message);
+        if (!media) {
+            hasUnsupported = true;
+            continue;
+        }
+        items.push(media);
+    }
+    return { items, hasUnsupported };
+}
+
+async function sendMediaGroupInChunks(chatId, items, options = {}) {
+    const chunkSize = 10;
+    for (let i = 0; i < items.length; i += chunkSize) {
+        const chunk = items.slice(i, i + chunkSize);
+        await bot.telegram.sendMediaGroup(chatId, chunk, options);
+    }
+}
+
+async function finalizeMediaGroup(key) {
+    const entry = pendingMediaGroups.get(key);
+    if (!entry) return;
+    pendingMediaGroups.delete(key);
+
+    const messages = normalizeMediaGroupMessages(entry.messages);
+    if (!messages.length) return;
+
+    const { stateStep, ctx, fromId } = entry;
+    const currentState = await getUserState(fromId);
+    if (!currentState || currentState.step !== stateStep) return;
+
+    const lang = await getUserLang(fromId, ctx.from?.language_code);
+
+    if (stateStep === STATES.SET_HOMEWORK || stateStep === STATES.SET_VOCABULARY || stateStep === STATES.SET_MATERIALS) {
+        const contentKey = stateStep === STATES.SET_HOMEWORK
+            ? CONTENT_KEYS.homework
+            : stateStep === STATES.SET_VOCABULARY
+                ? CONTENT_KEYS.vocabulary
+                : CONTENT_KEYS.materials;
+        const titleKey = stateStep === STATES.SET_HOMEWORK
+            ? 'text.contentUpdatedHomework'
+            : stateStep === STATES.SET_VOCABULARY
+                ? 'text.contentUpdatedVocabulary'
+                : 'text.contentUpdatedMaterials';
+        const { items, hasUnsupported } = buildMediaGroupPayload(messages);
+
+        if (!hasUnsupported && items.length) {
+            await persistContentMediaGroup(contentKey, items);
+        } else {
+            await persistContentCopyGroup(contentKey, ctx.chat.id, messages);
+        }
+
+        await setUserState(fromId, null);
+        await ctx.reply(textByLang(lang, titleKey), buildMenu(lang, ctx));
+        return;
+    }
+
+    if (stateStep === STATES.NEWS) {
+        try {
+            const { items, hasUnsupported } = buildMediaGroupPayload(messages);
+            if (!hasUnsupported && items.length) {
+                await sendMediaGroupInChunks(CHAT_IDS.group, items);
+            } else {
+                for (const msg of messages) {
+                    await bot.telegram.copyMessage(CHAT_IDS.group, ctx.chat.id, msg.message_id);
+                }
+            }
+        } catch (e) {
+            console.error('Group publish error:', e.message);
+            await ctx.reply(uiText(lang, 'sendToGroupFailed'));
+            return;
+        }
+
+        await setUserState(fromId, null);
+        await ctx.reply(textByLang(lang, 'text.sentToGroup'), buildMenu(lang, ctx));
+        return;
+    }
+
+    if (stateStep === STATES.BROADCAST) {
+        const students = await getStudentsForModeration();
+        let sent = 0;
+        let failed = 0;
+        const { items, hasUnsupported } = buildMediaGroupPayload(messages);
+
+        for (const student of students) {
+            try {
+                if (!hasUnsupported && items.length) {
+                    await sendMediaGroupInChunks(student.user_id, items);
+                } else {
+                    for (const msg of messages) {
+                        await bot.telegram.copyMessage(student.user_id, ctx.chat.id, msg.message_id);
+                    }
+                }
+                sent += 1;
+            } catch {
+                failed += 1;
+            }
+        }
+
+        await setUserState(fromId, null);
+        const report = template(uiText(lang, 'broadcastReport'), { sent, failed });
+        await ctx.reply(report, { parse_mode: 'HTML', ...buildMenu(lang, ctx) });
+        return;
+    }
+
+    if (stateStep === STATES.FEEDBACK) {
+        try {
+            const feedbackTopicId = await ensureDirectorFeedbackTopicId();
+
+            for (const msg of messages) {
+                let delivered;
+                try {
+                    delivered = await bot.telegram.forwardMessage(
+                        CHAT_IDS.directorChat,
+                        ctx.chat.id,
+                        msg.message_id,
+                        { message_thread_id: feedbackTopicId }
+                    );
+                } catch (forwardErr) {
+                    console.error('Feedback forward error, using copy fallback:', forwardErr.message);
+                    delivered = await bot.telegram.copyMessage(
+                        CHAT_IDS.directorChat,
+                        ctx.chat.id,
+                        msg.message_id,
+                        { message_thread_id: feedbackTopicId }
+                    );
+                }
+
+                const deliveredId = delivered?.message_id;
+                if (deliveredId) {
+                    await saveDirectorFeedbackLink(CHAT_IDS.directorChat, deliveredId, fromId);
+                }
+            }
+        } catch (e) {
+            console.error('Feedback forwarding error:', e.message);
+            await ctx.reply(uiText(lang, 'feedbackFailed'));
+            return;
+        }
+
+        await setUserState(fromId, null);
+        await ctx.reply(textByLang(lang, 'text.feedbackSent'), buildMenu(lang, ctx));
+        return;
+    }
+}
+
+async function handleMediaGroupMessage(ctx, state) {
+    const mediaGroupId = ctx.message?.media_group_id;
+    if (!mediaGroupId) return false;
+    if (!state?.step || !isSupportedMediaGroupStep(state.step)) return false;
+    if (ctx.chat?.type !== 'private') return false;
+
+    const key = mediaGroupKey(ctx.chat.id, mediaGroupId);
+    const existing = pendingMediaGroups.get(key);
+    const entry = existing || {
+        messages: [],
+        stateStep: state.step,
+        fromId: toId(ctx.from?.id),
+        ctx
+    };
+
+    entry.messages.push(ctx.message);
+    entry.ctx = ctx;
+
+    if (entry.timer) {
+        clearTimeout(entry.timer);
+    }
+    entry.timer = setTimeout(() => {
+        void finalizeMediaGroup(key);
+    }, MEDIA_GROUP_WINDOW_MS);
+
+    pendingMediaGroups.set(key, entry);
+    return true;
+}
+
 async function sendStudentCardToTopic(from, studentName, phone, username) {
     const teacherLang = await getUserLang(ROLE_IDS.teacher);
     const topicId = await ensureStudentTopic(from, studentName);
@@ -902,6 +1196,31 @@ async function sendStudentCardToTopic(from, studentName, phone, username) {
     } catch (e) {
         console.error('Student card send error:', e.message);
         throw e;
+    }
+}
+
+async function updateStudentTopicAndCard(userId, studentName) {
+    const safeName = String(studentName || 'Student').slice(0, 120);
+    let topicId = await getTopicByStudent(userId);
+
+    if (!topicId) {
+        topicId = await ensureStudentTopic({ id: userId, first_name: studentName }, studentName);
+    } else {
+        try {
+            await bot.telegram.editForumTopic(CHAT_IDS.teacherChat, topicId, { name: safeName });
+        } catch (e) {
+            console.error('Topic rename error:', e.message);
+        }
+        await saveStudentTopic(userId, topicId, safeName);
+    }
+
+    try {
+        const user = await getUserRecord(userId);
+        const phone = user?.phone || '-';
+        const username = user?.username || '';
+        await sendStudentCardToTopic({ id: userId, first_name: studentName }, studentName, phone, username);
+    } catch (e) {
+        console.error('Student card update error:', e.message);
     }
 }
 
@@ -937,6 +1256,7 @@ async function hasMembership(userId) {
 
 async function ensureStudentAccess(ctx) {
     if (isTeacher(ctx)) return true;
+    if (!(await ensureRenameProvided(ctx))) return false;
     const ok = await hasMembership(ctx.from.id);
     if (!ok) {
         const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
@@ -1059,9 +1379,11 @@ async function showStudentResultsMenu(ctx) {
 }
 
 async function persistContent(contentKey, chatId, messageId) {
-    contentStore[contentKey] = { chatId, messageId };
+    contentStore[contentKey] = { type: 'single', chatId, messageId };
     if (!dbReady) return;
     try {
+        await pool.query('DELETE FROM bot_content_media WHERE content_key = $1', [contentKey]);
+        await pool.query('DELETE FROM bot_content_items WHERE content_key = $1', [contentKey]);
         await pool.query(
             `INSERT INTO bot_content (content_key, source_chat_id, source_message_id)
              VALUES ($1, $2, $3)
@@ -1074,6 +1396,50 @@ async function persistContent(contentKey, chatId, messageId) {
         );
     } catch (e) {
         console.error('DB persist content error:', e.message);
+    }
+}
+
+async function persistContentMediaGroup(contentKey, items) {
+    contentStore[contentKey] = { type: 'album', items };
+    if (!dbReady) return;
+    try {
+        await pool.query('DELETE FROM bot_content WHERE content_key = $1', [contentKey]);
+        await pool.query('DELETE FROM bot_content_items WHERE content_key = $1', [contentKey]);
+        await pool.query('DELETE FROM bot_content_media WHERE content_key = $1', [contentKey]);
+        for (let i = 0; i < items.length; i += 1) {
+            const item = items[i];
+            await pool.query(
+                `INSERT INTO bot_content_media (content_key, position, media_type, file_id, caption)
+                 VALUES ($1, $2, $3, $4, $5)`,
+                [contentKey, i, item.type, item.media, item.caption || null]
+            );
+        }
+    } catch (e) {
+        console.error('DB persist media group error:', e.message);
+    }
+}
+
+async function persistContentCopyGroup(contentKey, chatId, messages) {
+    const items = messages.map((msg) => ({
+        chatId,
+        messageId: msg.message_id
+    }));
+    contentStore[contentKey] = { type: 'copy', items };
+    if (!dbReady) return;
+    try {
+        await pool.query('DELETE FROM bot_content WHERE content_key = $1', [contentKey]);
+        await pool.query('DELETE FROM bot_content_media WHERE content_key = $1', [contentKey]);
+        await pool.query('DELETE FROM bot_content_items WHERE content_key = $1', [contentKey]);
+        for (let i = 0; i < items.length; i += 1) {
+            const item = items[i];
+            await pool.query(
+                `INSERT INTO bot_content_items (content_key, position, source_chat_id, source_message_id)
+                 VALUES ($1, $2, $3, $4)`,
+                [contentKey, i, String(item.chatId), Number(item.messageId)]
+            );
+        }
+    } catch (e) {
+        console.error('DB persist content items error:', e.message);
     }
 }
 
@@ -1116,7 +1482,24 @@ async function showContent(ctx, contentKey, titleKey) {
 
     await ctx.reply(textByLang(lang, titleKey), { parse_mode: 'HTML' });
     try {
-        await bot.telegram.copyMessage(ctx.chat.id, data.chatId, data.messageId);
+        if (data.type === 'album' && Array.isArray(data.items) && data.items.length) {
+            await sendMediaGroupInChunks(ctx.chat.id, data.items);
+            return;
+        }
+        if (data.type === 'copy' && Array.isArray(data.items) && data.items.length) {
+            for (const item of data.items) {
+                await bot.telegram.copyMessage(ctx.chat.id, item.chatId, item.messageId);
+            }
+            return;
+        }
+        if (data.type === 'single' && data.chatId && data.messageId) {
+            await bot.telegram.copyMessage(ctx.chat.id, data.chatId, data.messageId);
+            return;
+        }
+        if (data.chatId && data.messageId) {
+            await bot.telegram.copyMessage(ctx.chat.id, data.chatId, data.messageId);
+            return;
+        }
     } catch {
         await ctx.reply(textByLang(lang, 'text.noContent'));
     }
@@ -1167,6 +1550,7 @@ bot.start(async (ctx) => {
     });
 
     if (!isTeacher(ctx)) {
+        if (!(await ensureRenameProvided(ctx))) return;
         if (!(await hasSelectedLanguage(ctx.from.id))) {
             await sendLanguageSelector(ctx, true);
             return;
@@ -1181,11 +1565,13 @@ bot.start(async (ctx) => {
 });
 
 bot.command('menu', async (ctx) => {
+    if (!(await ensureRenameProvided(ctx))) return;
     await showDefaultPrivateScreen(ctx);
 });
 
 bot.command('help', async (ctx) => {
     if (ctx.chat?.type !== 'private') return;
+    if (!(await ensureRenameProvided(ctx))) return;
 
     if (!isTeacher(ctx) && !(await hasSelectedLanguage(ctx.from.id))) {
         await sendLanguageSelector(ctx, true);
@@ -1198,6 +1584,7 @@ bot.command('help', async (ctx) => {
 
 bot.command('cancel', async (ctx) => {
     if (ctx.chat?.type !== 'private') return;
+    if (!(await ensureRenameProvided(ctx))) return;
 
     const fromId = toId(ctx.from.id);
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
@@ -1216,6 +1603,7 @@ bot.command('cancel', async (ctx) => {
 });
 
 bot.command('lang', async (ctx) => {
+    if (!(await ensureRenameProvided(ctx))) return;
     if (isTeacher(ctx)) {
         await ctx.reply('Для учителя и владельца язык зафиксирован: русский.');
         return;
@@ -1439,6 +1827,14 @@ bot.on('pre_checkout_query', async (ctx) => {
 bot.on('callback_query', async (ctx) => {
     const data = ctx.callbackQuery?.data || '';
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    if (!(await ensureRenameProvided(ctx))) {
+        try {
+            await ctx.answerCbQuery(textByLang(lang, 'text.renamePrompt'));
+        } catch {
+            
+        }
+        return;
+    }
 
     if (data === 'lang_ru' || data === 'lang_en') {
         if (isTeacher(ctx)) {
@@ -1694,7 +2090,7 @@ bot.on('message', async (ctx) => {
                 });
             }
         } catch {
-            // ignore delivery errors
+            
         }
         return;
     }
@@ -1709,12 +2105,20 @@ bot.on('message', async (ctx) => {
 
     const state = await getUserState(fromId);
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    if (state?.step === STATES.OWNER_RENAME_NAME && ctx.chat.type === 'private' && !isTeacher(ctx)) {
+        if (!ctx.message?.text) {
+            await ctx.reply(textByLang(lang, 'text.renamePrompt'), Markup.removeKeyboard());
+            return;
+        }
+    }
+    const mediaGroupHandled = await handleMediaGroupMessage(ctx, state);
+    if (mediaGroupHandled) return;
     const text = String(ctx.message.text || '').trim();
 
     if (state?.step === STATES.OWNER_RENAME_NAME && ctx.chat.type === 'private' && !isTeacher(ctx)) {
         const studentName = text;
         if (studentName.length < 2) {
-            await ctx.reply(textByLang(lang, 'text.askNameInvalid'));
+            await ctx.reply(textByLang(lang, 'text.renamePrompt'), Markup.removeKeyboard());
             return;
         }
 
@@ -1722,6 +2126,7 @@ bot.on('message', async (ctx) => {
             first_name: studentName,
             username: ctx.from.username || ''
         });
+        await updateStudentTopicAndCard(fromId, studentName);
         await setUserState(fromId, null);
         await ctx.reply(textByLang(lang, 'text.renameSaved'), buildMenu(lang, ctx));
         return;
@@ -1951,19 +2356,6 @@ bot.on('message', async (ctx) => {
     if (state.step === STATES.FEEDBACK) {
         try {
             const feedbackTopicId = await ensureDirectorFeedbackTopicId();
-            const headerMessage = await bot.telegram.sendMessage(
-                CHAT_IDS.directorChat,
-                textByLang(lang, 'text.ownerFeedbackHeader', {
-                    name: esc(ctx.from.first_name || 'Student'),
-                    id: fromId
-                }),
-                {
-                    parse_mode: 'HTML',
-                    message_thread_id: feedbackTopicId
-                }
-            );
-            await saveDirectorFeedbackLink(CHAT_IDS.directorChat, headerMessage.message_id, fromId);
-
             let forwardedMessage;
             try {
                 forwardedMessage = await bot.telegram.forwardMessage(
