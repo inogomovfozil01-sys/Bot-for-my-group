@@ -6,10 +6,10 @@ module.exports = {
 
     // Chat where teacher support threads are created (forum supergroup recommended)
     TEACHER_CHAT_ID: process.env.TEACHER_CHAT_ID || process.env.GROUP_ID || '-1003546840118',
-    // Chat and topic for student feedback addressed to the director.
+    // Chat and topic for student support requests.
     DIRECTOR_CHAT_ID: process.env.DIRECTOR_CHAT_ID || process.env.TEACHER_CHAT_ID || process.env.GROUP_ID || '-1003546840118',
     DIRECTOR_FEEDBACK_TOPIC_ID: process.env.DIRECTOR_FEEDBACK_TOPIC_ID || '',
-    DIRECTOR_FEEDBACK_TOPIC_TITLE: process.env.DIRECTOR_FEEDBACK_TOPIC_TITLE || 'Director Feedback',
+    DIRECTOR_FEEDBACK_TOPIC_TITLE: process.env.DIRECTOR_FEEDBACK_TOPIC_TITLE || 'Tech Support',
 
     // Postgres connection string
     DATABASE_URL: process.env.DATABASE_URL || 'postgresql://postgres:ZrpFafPDeqCYbTujpGjXzacdwENFZtiw@postgres-afeu.railway.internal:5432/railway',
