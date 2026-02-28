@@ -45,7 +45,9 @@ const STATES = {
     RESULT_CREATE_NAME: 'RESULT_CREATE_NAME',
     RESULT_CREATE_GRAMMAR: 'RESULT_CREATE_GRAMMAR',
     RESULT_CREATE_WORDLIST: 'RESULT_CREATE_WORDLIST',
-    RESULT_CREATE_CONFIRM: 'RESULT_CREATE_CONFIRM'
+    RESULT_CREATE_CONFIRM: 'RESULT_CREATE_CONFIRM',
+    ADMIN_BLOCK_USER: 'ADMIN_BLOCK_USER',
+    ADMIN_UNBLOCK_USER: 'ADMIN_UNBLOCK_USER'
 };
 
 const HTML_ESCAPE = {
@@ -62,6 +64,7 @@ const studentTopicCache = new Map();
 const topicStudentCache = new Map();
 const directorFeedbackLinkCache = new Map();
 const pendingMediaGroups = new Map();
+const blockedUsers = new Set();
 
 const MEDIA_GROUP_WINDOW_MS = 1200;
 const MEDIA_GROUP_STEPS = new Set([
@@ -82,6 +85,7 @@ const resultStore = new Map();
 
 let pool = null;
 let dbReady = false;
+let blockedUsersLoaded = false;
 
 if (config.DATABASE_URL) {
     const useSsl = /railway|render|supabase|amazonaws/i.test(config.DATABASE_URL) || process.env.DATABASE_SSL === 'true';
@@ -142,6 +146,11 @@ function isOwner(ctx) {
 function isTeacher(ctx) {
     const id = toId(ctx.from?.id);
     return id === ROLE_IDS.teacher || id === ROLE_IDS.owner;
+}
+
+function isProtectedUserId(userId) {
+    const id = toId(userId);
+    return id === ROLE_IDS.owner || id === ROLE_IDS.teacher;
 }
 
 function getPath(obj, path) {
@@ -272,6 +281,20 @@ function uiText(lang, key) {
 
     const normalized = normalizeLang(lang);
     return dict[normalized]?.[key] || dict.ru[key] || '';
+}
+
+function parseUserReference(input) {
+    const raw = String(input || '').trim();
+    if (!raw) return null;
+    const token = raw.split(/\s+/)[0];
+    const linkMatch = token.match(/(?:https?:\/\/)?t\.me\/([A-Za-z0-9_]+)/i);
+    const candidate = linkMatch ? linkMatch[1] : token;
+    if (/^\d+$/.test(candidate)) {
+        return { userId: candidate };
+    }
+    const username = candidate.replace(/^@/, '').trim();
+    if (!username) return null;
+    return { username };
 }
 
 function normalizePercent(value) {
@@ -564,6 +587,14 @@ async function initDB() {
             );
         `);
 
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS blocked_users (
+                user_id TEXT PRIMARY KEY,
+                blocked_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
         const contentRes = await pool.query(`
             SELECT content_key, source_chat_id, source_message_id
             FROM bot_content
@@ -630,6 +661,16 @@ async function initDB() {
                 updated_by: row.updated_by
             });
         }
+
+        const blockedRes = await pool.query(`
+            SELECT user_id
+            FROM blocked_users
+        `);
+        blockedUsers.clear();
+        for (const row of blockedRes.rows) {
+            blockedUsers.add(toId(row.user_id));
+        }
+        blockedUsersLoaded = true;
 
         dbReady = true;
         const meta = getDbConnectionMeta();
@@ -756,6 +797,131 @@ async function getStudents() {
 async function getStudentsForModeration() {
     const all = await getStudents();
     return all.filter((u) => ![ROLE_IDS.owner, ROLE_IDS.teacher].includes(toId(u.user_id)));
+}
+
+async function getUserByUsername(username) {
+    const normalized = String(username || '').replace(/^@/, '').trim().toLowerCase();
+    if (!normalized) return null;
+
+    if (dbReady) {
+        try {
+            const res = await pool.query(
+                'SELECT user_id, username, first_name, phone FROM users WHERE LOWER(username) = $1 LIMIT 1',
+                [normalized]
+            );
+            if (res.rowCount > 0) return res.rows[0];
+        } catch (e) {
+            console.error('DB read user by username error:', e.message);
+        }
+    }
+
+    for (const user of memoryUsers.values()) {
+        if (String(user.username || '').toLowerCase() === normalized) return user;
+    }
+
+    return null;
+}
+
+async function resolveUserIdFromInput(input) {
+    const parsed = parseUserReference(input);
+    if (!parsed) return { error: 'invalid' };
+    if (parsed.userId) return { userId: parsed.userId };
+
+    const user = await getUserByUsername(parsed.username);
+    if (!user) return { error: 'not_found' };
+
+    return { userId: toId(user.user_id) };
+}
+
+async function blockUser(userId, blockedBy) {
+    const id = toId(userId);
+    if (!id) return { ok: false, reason: 'invalid' };
+    if (isProtectedUserId(id)) return { ok: false, reason: 'protected' };
+
+    blockedUsers.add(id);
+    dialogs.delete(id);
+    await setUserState(id, null);
+
+    if (!dbReady) return { ok: true };
+
+    try {
+        await pool.query(
+            `INSERT INTO blocked_users (user_id, blocked_by)
+             VALUES ($1, $2)
+             ON CONFLICT (user_id)
+             DO UPDATE SET
+                blocked_by = EXCLUDED.blocked_by,
+                created_at = CURRENT_TIMESTAMP`,
+            [id, blockedBy ? toId(blockedBy) : null]
+        );
+    } catch (e) {
+        console.error('DB save blocked user error:', e.message);
+    }
+
+    return { ok: true };
+}
+
+async function unblockUser(userId) {
+    const id = toId(userId);
+    if (!id) return;
+    blockedUsers.delete(id);
+
+    if (!dbReady) return;
+    try {
+        await pool.query('DELETE FROM blocked_users WHERE user_id = $1', [id]);
+    } catch (e) {
+        console.error('DB delete blocked user error:', e.message);
+    }
+}
+
+async function loadBlockedUsersIfNeeded() {
+    if (!dbReady || blockedUsersLoaded) return;
+    try {
+        const res = await pool.query('SELECT user_id FROM blocked_users');
+        blockedUsers.clear();
+        for (const row of res.rows) {
+            blockedUsers.add(toId(row.user_id));
+        }
+        blockedUsersLoaded = true;
+    } catch (e) {
+        console.error('DB load blocked users error:', e.message);
+    }
+}
+
+async function isUserBlocked(userId) {
+    const id = toId(userId);
+    if (!id) return false;
+    if (isProtectedUserId(id)) return false;
+    await loadBlockedUsersIfNeeded();
+    return blockedUsers.has(id);
+}
+
+async function ensureNotBlocked(ctx) {
+    const userId = ctx.from?.id;
+    if (!userId) return true;
+    if (!(await isUserBlocked(userId))) return true;
+
+    const lang = await getUserLang(userId, ctx.from?.language_code);
+    const message = textByLang(lang, 'text.userBlocked');
+
+    try {
+        if (ctx.callbackQuery) {
+            await ctx.answerCbQuery(message, { show_alert: true });
+        }
+    } catch {
+        // ignore callback errors
+    }
+
+    const chatType = ctx.chat?.type || ctx.callbackQuery?.message?.chat?.type;
+    if (chatType === 'private') {
+        try {
+            await ctx.reply(message);
+        } catch {
+            // ignore reply errors
+        }
+    }
+
+    return false;
 }
 
 async function getBotSetting(settingKey) {
@@ -1510,13 +1676,17 @@ async function showAdminPanel(ctx) {
 
     try {
         const students = await getStudentsForModeration();
-        if (!students.length) {
-            await ctx.reply(textByLang(lang, 'text.noStudentsForModeration'));
-            return;
-        }
-
         const buttons = students.map((u) => [Markup.button.callback(u.first_name || u.user_id, `manage_${u.user_id}`)]);
-        await ctx.reply(textByLang(lang, 'text.adminSelectUser'), {
+        buttons.push([
+            Markup.button.callback(buttonByLang(lang, 'moderation.blockUser'), 'block_user'),
+            Markup.button.callback(buttonByLang(lang, 'moderation.unblockUser'), 'unblock_user')
+        ]);
+
+        const title = students.length
+            ? textByLang(lang, 'text.adminSelectUser')
+            : textByLang(lang, 'text.noStudentsForModeration');
+
+        await ctx.reply(title, {
             parse_mode: 'HTML',
             ...Markup.inlineKeyboard(buttons)
         });
@@ -1535,12 +1705,24 @@ function moderationInlineKeyboard(lang, targetId) {
             Markup.button.callback(buttonByLang(lang, 'moderation.unmute'), `unmute_${targetId}`),
             Markup.button.callback(buttonByLang(lang, 'moderation.unban'), `unban_${targetId}`)
         ],
+        [
+            Markup.button.callback(buttonByLang(lang, 'moderation.blockBot'), `blockbot_${targetId}`),
+            Markup.button.callback(buttonByLang(lang, 'moderation.unblockBot'), `unblockbot_${targetId}`)
+        ],
         [Markup.button.callback(buttonByLang(lang, 'moderation.deleteLast'), `delmsg_${targetId}`)],
         [Markup.button.callback(buttonByLang(lang, 'moderation.kick'), `kick_${targetId}`)],
         [Markup.button.callback(buttonByLang(lang, 'moderation.requestName'), `askname_${targetId}`)],
         [Markup.button.callback(buttonByLang(lang, 'moderation.back'), 'back_to_admin')]
     ]);
 }
+
+bot.use(async (ctx, next) => {
+    const chatType = ctx.chat?.type || ctx.callbackQuery?.message?.chat?.type;
+    if (chatType !== 'private') return next();
+    const allowed = await ensureNotBlocked(ctx);
+    if (!allowed) return;
+    return next();
+});
 
 bot.start(async (ctx) => {
     if (ctx.chat?.type !== 'private') return;
@@ -1905,6 +2087,20 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
 
+    if (data === 'block_user' || data === 'unblock_user') {
+        if (!isTeacher(ctx)) {
+            await ctx.answerCbQuery(textByLang(lang, 'text.noRights'));
+            return;
+        }
+
+        const step = data === 'block_user' ? STATES.ADMIN_BLOCK_USER : STATES.ADMIN_UNBLOCK_USER;
+        const promptKey = data === 'block_user' ? 'text.blockUserPrompt' : 'text.unblockUserPrompt';
+        await setUserState(ctx.from.id, { step });
+        await ctx.answerCbQuery();
+        await ctx.reply(textByLang(lang, promptKey), Markup.removeKeyboard());
+        return;
+    }
+
     if (data.startsWith('manage_')) {
         if (!isTeacher(ctx)) {
             await ctx.answerCbQuery(textByLang(lang, 'text.noRights'));
@@ -1931,7 +2127,16 @@ bot.on('callback_query', async (ctx) => {
 
         const students = await getStudentsForModeration();
         const buttons = students.map((u) => [Markup.button.callback(u.first_name || u.user_id, `manage_${u.user_id}`)]);
-        await ctx.editMessageText(textByLang(lang, 'text.adminSelectUser'), {
+        buttons.push([
+            Markup.button.callback(buttonByLang(lang, 'moderation.blockUser'), 'block_user'),
+            Markup.button.callback(buttonByLang(lang, 'moderation.unblockUser'), 'unblock_user')
+        ]);
+
+        const title = students.length
+            ? textByLang(lang, 'text.adminSelectUser')
+            : textByLang(lang, 'text.noStudentsForModeration');
+
+        await ctx.editMessageText(title, {
             parse_mode: 'HTML',
             ...Markup.inlineKeyboard(buttons)
         });
@@ -1964,7 +2169,7 @@ bot.on('callback_query', async (ctx) => {
     }
 
     const [action, target] = data.split('_');
-    if (!['mute', 'unmute', 'ban', 'unban', 'kick', 'delmsg'].includes(action)) return;
+    if (!['mute', 'unmute', 'ban', 'unban', 'kick', 'delmsg', 'blockbot', 'unblockbot'].includes(action)) return;
 
     if (!isTeacher(ctx)) {
         await ctx.answerCbQuery(textByLang(lang, 'text.noRights'));
@@ -1972,6 +2177,7 @@ bot.on('callback_query', async (ctx) => {
     }
 
     try {
+        let doneMessage = textByLang(lang, 'text.actionDone');
         if (action === 'mute') {
             await ctx.telegram.restrictChatMember(CHAT_IDS.group, target, {
                 permissions: { can_send_messages: false }
@@ -2012,12 +2218,30 @@ bot.on('callback_query', async (ctx) => {
             await ctx.telegram.unbanChatMember(CHAT_IDS.group, target);
         }
 
+        if (action === 'blockbot') {
+            const result = await blockUser(target, ctx.from.id);
+            if (!result.ok) {
+                const messageKey = result.reason === 'protected' ? 'text.blockUserProtected' : 'text.actionError';
+                const message = messageKey === 'text.actionError'
+                    ? textByLang(lang, messageKey, { error: result.reason || 'blocked' })
+                    : textByLang(lang, messageKey);
+                await ctx.answerCbQuery(message, { show_alert: true });
+                return;
+            }
+            doneMessage = textByLang(lang, 'text.blockUserDone', { id: target });
+        }
+
+        if (action === 'unblockbot') {
+            await unblockUser(target);
+            doneMessage = textByLang(lang, 'text.unblockUserDone', { id: target });
+        }
+
         if (action === 'delmsg') {
             const lastId = lastGroupMessages.get(toId(target));
             if (lastId) await ctx.telegram.deleteMessage(CHAT_IDS.group, lastId);
         }
 
-        await ctx.answerCbQuery(textByLang(lang, 'text.actionDone'));
+        await ctx.answerCbQuery(doneMessage);
     } catch (e) {
         await ctx.answerCbQuery(textByLang(lang, 'text.actionError', { error: e.message }), { show_alert: true });
     }
@@ -2114,6 +2338,51 @@ bot.on('message', async (ctx) => {
     const mediaGroupHandled = await handleMediaGroupMessage(ctx, state);
     if (mediaGroupHandled) return;
     const text = String(ctx.message.text || '').trim();
+
+    if (state?.step === STATES.ADMIN_BLOCK_USER && ctx.chat.type === 'private' && isTeacher(ctx)) {
+        if (!text) {
+            await ctx.reply(textByLang(lang, 'text.blockUserPrompt'));
+            return;
+        }
+
+        const resolved = await resolveUserIdFromInput(text);
+        if (resolved.error) {
+            const msgKey = resolved.error === 'not_found' ? 'text.blockUserNotFound' : 'text.blockUserInvalid';
+            await ctx.reply(textByLang(lang, msgKey));
+            return;
+        }
+
+        if (isProtectedUserId(resolved.userId)) {
+            await ctx.reply(textByLang(lang, 'text.blockUserProtected'));
+            return;
+        }
+
+        await blockUser(resolved.userId, ctx.from.id);
+        await setUserState(fromId, null);
+        await ctx.reply(textByLang(lang, 'text.blockUserDone', { id: resolved.userId }));
+        await showAdminPanel(ctx);
+        return;
+    }
+
+    if (state?.step === STATES.ADMIN_UNBLOCK_USER && ctx.chat.type === 'private' && isTeacher(ctx)) {
+        if (!text) {
+            await ctx.reply(textByLang(lang, 'text.unblockUserPrompt'));
+            return;
+        }
+
+        const resolved = await resolveUserIdFromInput(text);
+        if (resolved.error) {
+            const msgKey = resolved.error === 'not_found' ? 'text.blockUserNotFound' : 'text.blockUserInvalid';
+            await ctx.reply(textByLang(lang, msgKey));
+            return;
+        }
+
+        await unblockUser(resolved.userId);
+        await setUserState(fromId, null);
+        await ctx.reply(textByLang(lang, 'text.unblockUserDone', { id: resolved.userId }));
+        await showAdminPanel(ctx);
+        return;
+    }
 
     if (state?.step === STATES.OWNER_RENAME_NAME && ctx.chat.type === 'private' && !isTeacher(ctx)) {
         const studentName = text;
