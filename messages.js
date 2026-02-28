@@ -13,7 +13,7 @@ const LANGUAGES = {
                 results: 'Результаты',
                 gift: 'Поддержка проекта',
                 help: 'Чат с преподавателем',
-                feedback: 'Сообщение директору'
+                feedback: 'Техподдержка'
             },
             teacher: {
                 setHomework: 'Обновить ДЗ',
@@ -71,7 +71,7 @@ const LANGUAGES = {
             setMaterialsPrompt: 'Отправьте учебные материалы (текст или медиа).',
             sendNewsPrompt: 'Отправьте сообщение для публикации в группе (текст или медиа).',
             broadcastPrompt: 'Отправьте сообщение для общей рассылки ученикам (текст или медиа).',
-            feedbackPrompt: 'Отправьте сообщение директору.',
+            feedbackPrompt: 'Отправьте сообщение в техподдержку.',
 
             contentUpdatedHomework: 'Домашнее задание сохранено.',
             contentUpdatedVocabulary: 'Словарь сохранен.',
@@ -139,7 +139,7 @@ const LANGUAGES = {
             renamePrompt: 'Владелец попросил указать корректное имя.\nВведите имя заново.',
             renameSaved: 'Имя обновлено.',
 
-            ownerFeedbackHeader: 'Обратная связь от {name} ({id})'
+            ownerFeedbackHeader: 'Обращение в техподдержку от {name} ({id})'
         }
     },
     en: {
@@ -156,7 +156,7 @@ const LANGUAGES = {
                 results: 'Results',
                 gift: 'Support Project',
                 help: 'Teacher Chat',
-                feedback: 'Message Director'
+                feedback: 'Tech Support'
             },
             teacher: {
                 setHomework: 'Update Homework',
@@ -214,7 +214,7 @@ const LANGUAGES = {
             setMaterialsPrompt: 'Send learning materials (text or media).',
             sendNewsPrompt: 'Send a message to post in the group (text or media).',
             broadcastPrompt: 'Send a message for global student broadcast (text or media).',
-            feedbackPrompt: 'Send a message to the director.',
+            feedbackPrompt: 'Send a message to tech support.',
 
             contentUpdatedHomework: 'Homework saved.',
             contentUpdatedVocabulary: 'Vocabulary saved.',
@@ -282,7 +282,7 @@ const LANGUAGES = {
             renamePrompt: 'The owner asked you to provide a proper name.\nPlease enter it again.',
             renameSaved: 'Name updated.',
 
-            ownerFeedbackHeader: 'Feedback from {name} ({id})'
+            ownerFeedbackHeader: 'Tech support request from {name} ({id})'
         }
     }
 };
