@@ -1,5 +1,10 @@
 const { Telegraf, Markup } = require('telegraf');
-const { Pool } = require('pg');
+let Pool = null;
+try {
+    ({ Pool } = require('pg'));
+} catch {
+    Pool = null;
+}
 const config = require('./config');
 const msgs = require('./messages');
 
@@ -14,7 +19,7 @@ const CHAT_IDS = {
     group: String(config.GROUP_ID),
     teacherChat: String(config.TEACHER_CHAT_ID),
     // Support thread must live inside teacher forum chat.
-    directorChat: String(config.TEACHER_CHAT_ID)
+    directorChat: String(config.DIRECTOR_CHAT_ID || config.TEACHER_CHAT_ID)
 };
 
 const BOT_SETTING_KEYS = {
@@ -87,7 +92,7 @@ let pool = null;
 let dbReady = false;
 let blockedUsersLoaded = false;
 
-if (config.DATABASE_URL) {
+if (config.DATABASE_URL && Pool) {
     const useSsl = /railway|render|supabase|amazonaws/i.test(config.DATABASE_URL) || process.env.DATABASE_SSL === 'true';
     pool = new Pool({
         connectionString: config.DATABASE_URL,
@@ -167,6 +172,11 @@ function getDefaultLangFromTelegram(languageCode) {
 
 function normalizeLang(lang) {
     return msgs.SUPPORTED_LANGS.includes(lang) ? lang : msgs.DEFAULT_LANG;
+}
+
+function normalizeDisplayName(value, fallback = 'Student') {
+    const trimmed = String(value || '').trim();
+    return trimmed || fallback;
 }
 
 function textByLang(lang, path, vars) {
@@ -326,8 +336,7 @@ async function setUserState(userId, state = null) {
         userStates.delete(id);
         if (!dbReady) return;
         try {
-            awai
-             pool.query('DELETE FROM user_states WHERE user_id = $1', [id]);
+            await pool.query('DELETE FROM user_states WHERE user_id = $1', [id]);
         } catch (e) {
             console.error('DB delete user state error:', e.message);
         }
@@ -372,6 +381,65 @@ async function getUserState(userId) {
     } catch (e) {
         console.error('DB read user state error:', e.message);
         return null;
+    }
+}
+
+async function saveStudentDialog(userId, threadId) {
+    const id = toId(userId);
+    const normalizedThreadId = normalizeThreadId(threadId);
+    if (!normalizedThreadId) return null;
+
+    const dialog = { threadId: normalizedThreadId };
+    dialogs.set(id, dialog);
+    if (!dbReady) return dialog;
+
+    try {
+        await pool.query(
+            `INSERT INTO student_dialogs (user_id, thread_id)
+             VALUES ($1, $2)
+             ON CONFLICT (user_id)
+             DO UPDATE SET
+                thread_id = EXCLUDED.thread_id,
+                updated_at = CURRENT_TIMESTAMP`,
+            [id, normalizedThreadId]
+        );
+    } catch (e) {
+        console.error('DB save student dialog error:', e.message);
+    }
+
+    return dialog;
+}
+
+async function getStudentDialog(userId) {
+    const id = toId(userId);
+    if (dialogs.has(id)) return dialogs.get(id);
+    if (!dbReady) return null;
+
+    try {
+        const res = await pool.query('SELECT thread_id FROM student_dialogs WHERE user_id = $1', [id]);
+        if (res.rowCount < 1) return null;
+
+        const threadId = normalizeThreadId(res.rows[0].thread_id);
+        if (!threadId) return null;
+
+        const dialog = { threadId };
+        dialogs.set(id, dialog);
+        return dialog;
+    } catch (e) {
+        console.error('DB read student dialog error:', e.message);
+        return null;
+    }
+}
+
+async function deleteStudentDialog(userId) {
+    const id = toId(userId);
+    dialogs.delete(id);
+    if (!dbReady) return;
+
+    try {
+        await pool.query('DELETE FROM student_dialogs WHERE user_id = $1', [id]);
+    } catch (e) {
+        console.error('DB delete student dialog error:', e.message);
     }
 }
 
@@ -435,8 +503,13 @@ function getDbConnectionMeta() {
 }
 
 async function initDB() {
-    if (!pool) {
+    if (!config.DATABASE_URL) {
         console.warn('DATABASE_URL is not configured. Using in-memory fallback.');
+        return;
+    }
+
+    if (!Pool || !pool) {
+        console.warn('pg module is not installed. Database features are disabled, using in-memory fallback.');
         return;
     }
 
@@ -595,6 +668,19 @@ async function initDB() {
             );
         `);
 
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS student_dialogs (
+                user_id TEXT PRIMARY KEY,
+                thread_id BIGINT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        await pool.query(`
+            ALTER TABLE student_dialogs
+            ALTER COLUMN user_id TYPE TEXT USING user_id::text;
+        `);
+
         const contentRes = await pool.query(`
             SELECT content_key, source_chat_id, source_message_id
             FROM bot_content
@@ -746,6 +832,11 @@ async function getUserLang(userId, telegramLangCode) {
     return getDefaultLangFromTelegram(telegramLangCode);
 }
 
+async function getDisplayName(userId, from) {
+    const user = await getUserRecord(userId);
+    return normalizeDisplayName(user?.first_name, from?.first_name || from?.username || 'Student');
+}
+
 async function setUserLang(userId, language, profile = {}) {
     const lang = normalizeLang(language);
     await upsertUserRecord(userId, {
@@ -839,7 +930,7 @@ async function blockUser(userId, blockedBy) {
     if (isProtectedUserId(id)) return { ok: false, reason: 'protected' };
 
     blockedUsers.add(id);
-    dialogs.delete(id);
+    await deleteStudentDialog(id);
     await setUserState(id, null);
 
     if (!dbReady) return { ok: true };
@@ -1086,6 +1177,12 @@ async function ensureStudentTopic(from, preferredName) {
     const safeName = String(baseName).slice(0, 120);
 
     if (existing) {
+        try {
+            await bot.telegram.editForumTopic(CHAT_IDS.teacherChat, existing, { name: safeName });
+        } catch (e) {
+            console.error('Topic rename error:', e.message);
+        }
+        await saveStudentTopic(userId, existing, safeName);
         return existing;
     }
 
@@ -1390,6 +1487,40 @@ async function updateStudentTopicAndCard(userId, studentName) {
     }
 }
 
+async function syncStudentProfileArtifacts(from, overrides = {}) {
+    if (!from?.id || isProtectedUserId(from.id)) return;
+
+    const userId = toId(from.id);
+    const current = await getUserRecord(userId);
+    const nextUsername = String(overrides.username ?? from.username ?? '').trim();
+    const nextName = normalizeDisplayName(
+        overrides.first_name ?? current?.first_name,
+        from.first_name || from.username || 'Student'
+    );
+    const hadStoredName = Boolean(String(current?.first_name || '').trim());
+    const hadUsername = String(current?.username || '').trim();
+    const profilePatch = {};
+
+    if (nextUsername !== hadUsername) {
+        profilePatch.username = nextUsername;
+    }
+    if (!hadStoredName) {
+        profilePatch.first_name = nextName;
+    }
+
+    if (Object.keys(profilePatch).length) {
+        await upsertUserRecord(userId, profilePatch);
+    }
+
+    const hasPhone = Boolean(overrides.phone ?? current?.phone);
+    const topicId = await getTopicByStudent(userId);
+    const shouldRefreshArtifacts = hasPhone && (!topicId || nextUsername !== hadUsername || !hadStoredName);
+
+    if (shouldRefreshArtifacts) {
+        await updateStudentTopicAndCard(userId, nextName);
+    }
+}
+
 async function syncStudentTopics() {
     const students = await getStudentsForModeration();
     let created = 0;
@@ -1465,11 +1596,12 @@ function buildMenu(lang, ctx) {
 
 async function sendMainMenu(ctx) {
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    const name = esc(await getDisplayName(ctx.from.id, ctx.from));
     const title = isOwner(ctx)
-        ? textByLang(lang, 'menus.owner')
+        ? textByLang(lang, 'menus.owner', { name })
         : isTeacher(ctx)
-            ? textByLang(lang, 'menus.teacher')
-            : textByLang(lang, 'menus.student');
+            ? textByLang(lang, 'menus.teacher', { name })
+            : textByLang(lang, 'menus.student', { name });
 
     await ctx.reply(title, { parse_mode: 'HTML', ...buildMenu(lang, ctx) });
 }
@@ -1497,13 +1629,14 @@ function helpMessageByRole(lang, ctx) {
 
 async function sendStartGreeting(ctx) {
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
+    const name = esc(await getDisplayName(ctx.from.id, ctx.from));
     const key = isOwner(ctx)
         ? 'text.startGreetingOwner'
         : isTeacher(ctx)
             ? 'text.startGreetingTeacher'
             : 'text.startGreetingStudent';
 
-    await ctx.reply(textByLang(lang, key), { parse_mode: 'HTML' });
+    await ctx.reply(textByLang(lang, key, { name }), { parse_mode: 'HTML' });
 }
 
 function resultListKeyboard(lang, results, includeCreate = false) {
@@ -1727,9 +1860,7 @@ bot.use(async (ctx, next) => {
 bot.start(async (ctx) => {
     if (ctx.chat?.type !== 'private') return;
 
-    await upsertUserRecord(ctx.from.id, {
-        username: ctx.from.username || ''
-    });
+    await syncStudentProfileArtifacts(ctx.from);
 
     if (!isTeacher(ctx)) {
         if (!(await ensureRenameProvided(ctx))) return;
@@ -1771,14 +1902,14 @@ bot.command('cancel', async (ctx) => {
     const fromId = toId(ctx.from.id);
     const lang = await getUserLang(ctx.from.id, ctx.from.language_code);
     const state = await getUserState(fromId);
-    const hadDialog = dialogs.has(fromId);
+    const hadDialog = Boolean(await getStudentDialog(fromId));
 
     if (!state && !hadDialog) {
         await ctx.reply(uiText(lang, 'noActiveAction'));
         return;
     }
 
-    dialogs.delete(fromId);
+    await deleteStudentDialog(fromId);
     await setUserState(fromId, null);
     await ctx.reply(uiText(lang, 'cancelDone'));
     await showDefaultPrivateScreen(ctx);
@@ -1857,7 +1988,7 @@ bot.on('contact', async (ctx) => {
             language: lang
         });
 
-        await sendStudentCardToTopic(ctx.from, studentName, ctx.message.contact.phone_number, ctx.from.username || '');
+        await updateStudentTopicAndCard(ctx.from.id, studentName);
         await setUserState(ctx.from.id, null);
         await ctx.reply(textByLang(lang, 'text.registrationSuccess'), buildMenu(lang, ctx));
         await ctx.reply(textByLang(lang, 'text.registrationTopicCardSent'));
@@ -1897,7 +2028,7 @@ registerLocalizedHears('student.help', async (ctx) => {
     try {
         const user = await getUserRecord(ctx.from.id);
         const topicId = await ensureStudentTopic(ctx.from, user?.first_name || ctx.from.first_name);
-        dialogs.set(toId(ctx.from.id), { threadId: topicId });
+        await saveStudentDialog(ctx.from.id, topicId);
 
         await ctx.reply(
             textByLang(studentLang, 'text.helpCreated'),
@@ -2158,7 +2289,7 @@ bot.on('callback_query', async (ctx) => {
         try {
             const targetLang = await getUserLang(targetId);
             await setUserState(targetId, { step: STATES.OWNER_RENAME_NAME });
-            dialogs.delete(targetId);
+            await deleteStudentDialog(targetId);
 
             await bot.telegram.sendMessage(targetId, textByLang(targetLang, 'text.renamePrompt'), Markup.removeKeyboard());
             await ctx.answerCbQuery(textByLang(lang, 'text.renameRequestSent'));
@@ -2251,9 +2382,7 @@ bot.on('message', async (ctx) => {
     const fromId = toId(ctx.from?.id);
     const chatId = toId(ctx.chat?.id);
 
-    await upsertUserRecord(fromId, {
-        username: ctx.from?.username || ''
-    });
+    await syncStudentProfileArtifacts(ctx.from);
 
     if (chatId === CHAT_IDS.group) {
         lastGroupMessages.set(fromId, ctx.message.message_id);
@@ -2292,7 +2421,7 @@ bot.on('message', async (ctx) => {
         if (!studentId) return;
 
         if (ctx.message.text && isFinishText(ctx.message.text)) {
-            dialogs.delete(studentId);
+            await deleteStudentDialog(studentId);
             const teacherLang = await getUserLang(ctx.from.id, ctx.from.language_code);
             await bot.telegram.sendMessage(studentId, textByLang(teacherLang, 'text.dialogClosed'));
             return;
@@ -2399,7 +2528,7 @@ bot.on('message', async (ctx) => {
         await setUserState(fromId, null);
         await ctx.reply(textByLang(lang, 'text.renameSaved'), buildMenu(lang, ctx));
         return;
-    }
+    }   
 
     if (state?.step === STATES.REGISTER_NAME && ctx.chat.type === 'private' && !isTeacher(ctx)) {
         const studentName = text;
@@ -2559,12 +2688,15 @@ bot.on('message', async (ctx) => {
         return;
     }
 
-    if (dialogs.has(fromId) && ctx.chat.type === 'private' && !isTeacher(ctx)) {
-        const dialog = dialogs.get(fromId);
+    const dialog = ctx.chat.type === 'private' && !isTeacher(ctx)
+        ? await getStudentDialog(fromId)
+        : null;
+
+    if (dialog) {
         const studentLang = await getUserLang(ctx.from.id, ctx.from.language_code);
 
         if (ctx.message.text && isFinishText(ctx.message.text)) {
-            dialogs.delete(fromId);
+            await deleteStudentDialog(fromId);
             await bot.telegram.sendMessage(
                 CHAT_IDS.teacherChat,
                 textByLang(studentLang, 'text.dialogClosed'),
@@ -2721,13 +2853,13 @@ process.once('SIGTERM', () => {
     void gracefulShutdown('SIGTERM');
 });
 
-bot.launch()
-    .then(() => {
-        console.log('BOT STARTED');
-    })
-    .catch((e) => {
-        console.error('Bot launch error:', e.message);
-        process.exit(1);
-    });
+async function startBot() {
+    await initDB();
+    await bot.launch();
+    console.log('BOT STARTED');
+}
 
-initDB();
+startBot().catch((e) => {
+    console.error('Bot launch error:', e.message);
+    process.exit(1);
+});
