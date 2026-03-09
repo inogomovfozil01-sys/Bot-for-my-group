@@ -69,9 +69,11 @@ const studentTopicCache = new Map();
 const topicStudentCache = new Map();
 const directorFeedbackLinkCache = new Map();
 const pendingMediaGroups = new Map();
+const pendingDialogMediaGroups = new Map();
 const blockedUsers = new Set();
 
 const MEDIA_GROUP_WINDOW_MS = 1200;
+const DIALOG_MEDIA_GROUP_WINDOW_MS = 1200;
 const MEDIA_GROUP_STEPS = new Set([
     STATES.SET_HOMEWORK,
     STATES.SET_VOCABULARY,
@@ -120,6 +122,10 @@ function feedbackLinkKey(chatId, messageId) {
 
 function mediaGroupKey(chatId, mediaGroupId) {
     return `${toId(chatId)}:${String(mediaGroupId)}`;
+}
+
+function threadedMediaGroupKey(chatId, threadId, mediaGroupId) {
+    return `${toId(chatId)}:${normalizeThreadId(threadId) || 0}:${String(mediaGroupId)}`;
 }
 
 function isSupportedMediaGroupStep(step) {
@@ -1284,6 +1290,128 @@ async function sendMediaGroupInChunks(chatId, items, options = {}) {
     }
 }
 
+function prependPrefixToMediaGroup(items, prefix) {
+    if (!items.length || !prefix) {
+        return items.map((item) => ({ ...item }));
+    }
+
+    return items.map((item, index) => {
+        if (index !== 0) return { ...item };
+        const caption = item.caption ? `${prefix}\n\n${item.caption}` : prefix;
+        return { ...item, caption };
+    });
+}
+
+async function copyMessageWithOptionalPrefix(targetChatId, sourceChatId, message, extra = {}, prefix = '') {
+    const normalizedPrefix = String(prefix || '').trim();
+
+    if (message?.text) {
+        const text = normalizedPrefix ? `${normalizedPrefix}\n\n${message.text}` : message.text;
+        return bot.telegram.sendMessage(targetChatId, text, extra);
+    }
+
+    if (message?.caption || normalizedPrefix) {
+        const caption = normalizedPrefix
+            ? (message?.caption ? `${normalizedPrefix}\n\n${message.caption}` : normalizedPrefix)
+            : message.caption;
+        return bot.telegram.copyMessage(targetChatId, sourceChatId, message.message_id, {
+            ...extra,
+            caption
+        });
+    }
+
+    return bot.telegram.copyMessage(targetChatId, sourceChatId, message.message_id, extra);
+}
+
+async function finalizeDialogMediaGroup(key) {
+    const entry = pendingDialogMediaGroups.get(key);
+    if (!entry) return;
+    pendingDialogMediaGroups.delete(key);
+
+    const messages = normalizeMediaGroupMessages(entry.messages);
+    if (!messages.length) return;
+
+    if (entry.direction === 'teacher_to_student') {
+        const studentLang = await getUserLang(entry.studentId);
+        const prefix = textByLang(studentLang, 'text.teacherMessagePrefix');
+        const { items, hasUnsupported } = buildMediaGroupPayload(messages);
+
+        try {
+            if (!hasUnsupported && items.length) {
+                await sendMediaGroupInChunks(entry.studentId, prependPrefixToMediaGroup(items, prefix));
+            } else {
+                for (let i = 0; i < messages.length; i += 1) {
+                    const message = messages[i];
+                    await copyMessageWithOptionalPrefix(
+                        entry.studentId,
+                        CHAT_IDS.teacherChat,
+                        message,
+                        {},
+                        i === 0 ? prefix : ''
+                    );
+                }
+            }
+        } catch (e) {
+            console.error('Teacher dialog media group delivery error:', e.message);
+        }
+
+        return;
+    }
+
+    if (entry.direction === 'student_to_teacher') {
+        const studentLang = await getUserLang(entry.ctx.from.id, entry.ctx.from.language_code);
+        const { items, hasUnsupported } = buildMediaGroupPayload(messages);
+
+        try {
+            if (!hasUnsupported && items.length) {
+                await sendMediaGroupInChunks(CHAT_IDS.teacherChat, items, {
+                    message_thread_id: entry.threadId
+                });
+            } else {
+                for (const message of messages) {
+                    await bot.telegram.copyMessage(CHAT_IDS.teacherChat, entry.sourceChatId, message.message_id, {
+                        message_thread_id: entry.threadId
+                    });
+                }
+            }
+
+            await entry.ctx.reply(textByLang(studentLang, 'text.studentMessageSent'));
+        } catch (e) {
+            console.error('Student dialog media group delivery error:', e.message);
+            await entry.ctx.reply(textByLang(studentLang, 'text.helpTopicFail'));
+        }
+    }
+}
+
+async function queueDialogMediaGroup(ctx, entryMeta) {
+    const mediaGroupId = ctx.message?.media_group_id;
+    if (!mediaGroupId) return false;
+
+    const key = threadedMediaGroupKey(ctx.chat.id, ctx.message?.message_thread_id, mediaGroupId);
+    const existing = pendingDialogMediaGroups.get(key);
+    const entry = existing || {
+        ...entryMeta,
+        messages: [],
+        sourceChatId: ctx.chat.id,
+        ctx
+    };
+
+    entry.messages.push(ctx.message);
+    entry.ctx = ctx;
+    entry.sourceChatId = ctx.chat.id;
+
+    if (entry.timer) {
+        clearTimeout(entry.timer);
+    }
+
+    entry.timer = setTimeout(() => {
+        void finalizeDialogMediaGroup(key);
+    }, DIALOG_MEDIA_GROUP_WINDOW_MS);
+
+    pendingDialogMediaGroups.set(key, entry);
+    return true;
+}
+
 async function finalizeMediaGroup(key) {
     const entry = pendingMediaGroups.get(key);
     if (!entry) return;
@@ -2420,6 +2548,12 @@ bot.on('message', async (ctx) => {
         const studentId = await getStudentByTopic(threadId);
         if (!studentId) return;
 
+        const dialogMediaGroupHandled = await queueDialogMediaGroup(ctx, {
+            direction: 'teacher_to_student',
+            studentId
+        });
+        if (dialogMediaGroupHandled) return;
+
         if (ctx.message.text && isFinishText(ctx.message.text)) {
             await deleteStudentDialog(studentId);
             const teacherLang = await getUserLang(ctx.from.id, ctx.from.language_code);
@@ -2442,8 +2576,8 @@ bot.on('message', async (ctx) => {
                     caption: prefix
                 });
             }
-        } catch {
-            
+        } catch (e) {
+            console.error('Teacher dialog delivery error:', e.message);
         }
         return;
     }
@@ -2694,6 +2828,11 @@ bot.on('message', async (ctx) => {
 
     if (dialog) {
         const studentLang = await getUserLang(ctx.from.id, ctx.from.language_code);
+        const dialogMediaGroupHandled = await queueDialogMediaGroup(ctx, {
+            direction: 'student_to_teacher',
+            threadId: dialog.threadId
+        });
+        if (dialogMediaGroupHandled) return;
 
         if (ctx.message.text && isFinishText(ctx.message.text)) {
             await deleteStudentDialog(fromId);
